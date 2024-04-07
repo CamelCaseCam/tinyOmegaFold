@@ -34,7 +34,7 @@ from omegafold.utils.protein_utils.functions import (
 )
 from omegafold.utils.torch_utils import (
     mask2bias,
-    masked_mean,
+    #masked_mean,
     normalize,
     recursive_to,
 )

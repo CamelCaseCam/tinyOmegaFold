@@ -15,7 +15,7 @@
 # limitations under the License.
 # =============================================================================
 """
-PyTorch utilities
+Tinygrad utilities
 """
 # =============================================================================
 # Imports
@@ -23,8 +23,8 @@ PyTorch utilities
 import numbers
 import typing
 
-import torch
-from torch.nn import functional as F
+import tinygrad
+from tinygrad.nn import LayerNorm
 
 # =============================================================================
 # Constants
@@ -36,7 +36,7 @@ T = typing.TypeVar("T")
 # =============================================================================
 # Functions
 # =============================================================================
-def mask2bias(mask: torch.Tensor, *, inf: float = 1e9) -> torch.Tensor:
+def mask2bias(mask: tinygrad.Tensor, *, inf: float = 1e9) -> tinygrad.Tensor:
     """Convert mask to attention bias
 
     Args:
@@ -51,11 +51,11 @@ def mask2bias(mask: torch.Tensor, *, inf: float = 1e9) -> torch.Tensor:
 
 
 def normalize(
-        inputs: torch.Tensor,
+        inputs: tinygrad.Tensor,
         normalized_shape: typing.Optional[
-            typing.Union[int, typing.List[int], torch.Size]] = None,
+            typing.Union[int, typing.List[int], typing.Tuple[int]]] = None,
         in_place: bool = False
-) -> torch.Tensor:
+) -> tinygrad.Tensor:
     """Layer normalization without a module (and weight)
 
     Args:
@@ -75,37 +75,15 @@ def normalize(
     if in_place:
         # This seems to create small discrepancy in result
         dim = list(range(len(inputs.shape))[-len(normalized_shape):])
-        inputs -= inputs.mean(dim=dim, keepdim=True)
-        inputs *= torch.rsqrt(inputs.var(dim=dim, keepdim=True) + 1e-5)
+        inputs -= inputs.mean(axis=dim, keepdim=True)
+        inputs *= tinygrad.Tensor.rsqrt(inputs.var(axis=dim, keepdim=True) + 1e-5)
         return inputs
     else:
-        # F.layer_norm seems a bit faster
-        return F.layer_norm(inputs, normalized_shape, None, None, 1e-5)
-
-
-#def masked_mean(
-#        values: torch.Tensor,
-#        mask: torch.Tensor,
-#        dim: typing.Union[int, typing.Sequence[int], None],
-#        keepdim: typing.Optional[bool] = False,
-#        eps: typing.Optional[float] = 4e-5
-#) -> torch.Tensor:
-#    """Mean operation with mask
-
-#    Args:
-#        values: the values to take the mean for
-#        mask: the mask to take the mean with
-#        dim: the dimension along which to take the mean
-#        keepdim: to keep the dimension
-#        eps: the epsilon to compute mean for
-
-#    Returns:
-#        mean result
-
-#    """
-#    values = values.masked_fill(~mask.bool(), 0).sum(dim, keepdim=keepdim)
-#    norm = mask.sum(dim, keepdim=keepdim, dtype=values.dtype) + eps
-#    return values / norm
+        # The commented out implementation also works, but uses the LayerNorm class and has the normalized_shape argument.
+        #layernorm = LayerNorm(normalized_shape=normalized_shape, eps=1e-5, elementwise_affine=False)
+        #return layernorm(inputs)
+        return tinygrad.Tensor.layernorm(inputs, eps=1e-5)
+        
 
 
 def recursive_to(obj: typing.Any, **kwargs) -> typing.Any:
@@ -121,7 +99,7 @@ def recursive_to(obj: typing.Any, **kwargs) -> typing.Any:
         cuda tensors in its original construct
 
     """
-    if isinstance(obj, torch.Tensor):
+    if isinstance(obj, tinygrad.Tensor):
         try:
             return obj.to(**kwargs)
         except RuntimeError:
