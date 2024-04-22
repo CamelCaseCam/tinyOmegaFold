@@ -56,13 +56,12 @@ def to_tinygrad(x: torch.Tensor, checknan=False) -> tinygrad.Tensor:
 def to_torch(x: tinygrad.Tensor, device: typing.Optional[torch.device] = None) -> torch.Tensor:
     if x is None:
         return None
+    if device is None:
+        device = dv2trch[x.device]
+    if not isinstance(x, tinygrad.Tensor):
+        return x
     x = x.realize()
-    if device is not None:
-        t = torch.tensor(x.numpy(), requires_grad=False, device=device)
-        if t.isnan().any():
-            return torch.nan_to_num(t)
-        return t
-    t = torch.tensor(x.numpy(), requires_grad=False)
+    t = torch.tensor(x.numpy(), requires_grad=False, device=device)
     if t.isnan().any():
         return torch.nan_to_num(t)
     return t
@@ -93,46 +92,18 @@ def softmax(
     Returns:
 
     """
-    x = to_tinygrad(x, checknan=True)
+    x = to_tinygrad(x, checknan=False)
 
     ### In place removed because tinygrad's kernel fusion makes it redundant
     return to_torch(x.softmax(axis=dim), device=dv2trch[x.device])
 
-'''def _attention(
-        query: tinygrad.Tensor,
-        key: tinygrad.Tensor,
-        scale: tinygrad.Tensor,
-        value: tinygrad.Tensor,
-        bias: tinygrad.Tensor,
-        return_edge: bool,
-        edge_reduction: str,
-        edge_reduction_dim: int
-) -> typing.Tuple[tinygrad.Tensor, typing.Optional[tinygrad.Tensor]]:
-    """Normal attention
+# Define einsum formulae for different shapes
+einsum_formulae = {
+    (2, 2, 2): ("id, jd -> ij", "ij, jd -> id"),
+    (3, 3, 3): ("bid, bjd -> bij", "bij, bjd -> bid"),
+    (5, 5, 5): ("abcid, abcjd -> abcij", "abcij, abcjd -> abcid")
+}
 
-    Args:
-        query: positive tensor of shape (*_q, dim_qk)
-        key: positive tensor of shape (*_k, dim_qk)
-        scale: the scaling of logits
-        value: tensor of shape (*_k, dim_v)
-        bias: the bias acting as either mask or relative positional encoding
-        return_edge: if to return the logits of attention
-
-    Returns:
-        The aggregated tensor of shape (*_q, dim_v)
-
-    """
-    logits = tinygrad.Tensor.einsum("bid, bjd -> bij", (query * scale), key)    # TODO: fix this. Tinygrad does not support arbitrary einsum indices but they should fix this soon. If not, replace it after exams
-    logits.add(bias)
-    attn = softmax(logits, dim=-1, in_place=not return_edge)
-    attn = to_tinygrad(attn)
-    out = tinygrad.Tensor.einsum("bij, bjd -> bid", attn, value)
-    if return_edge:
-        attr = getattr(attn, edge_reduction) # Returns sum
-        attn = attr(axis=edge_reduction_dim)
-        return out, attn
-    else:
-        return out, None'''
 def _attention(
         query: tinygrad.Tensor,
         key: tinygrad.Tensor,
@@ -160,20 +131,16 @@ def _attention(
     q_shape = query.shape
     k_shape = key.shape
     v_shape = value.shape
+
+    logits_formula, out_formula = einsum_formulae[(len(q_shape), len(k_shape), len(v_shape))]
     
-    # Define einsum formulae for different shapes
-    einsum_formulae = {
-        (2, 2, 2): ("id, jd -> ij", "ij, jd -> id"),
-        (3, 3, 3): ("bid, bjd -> bij", "bij, bjd -> bid"),
-        (5, 5, 5): ("abcid, abcjd -> abcij", "abcij, abcjd -> abcid")
-    }
-    
-    logits = torch.einsum("...id, ...jd -> ...ij", query * scale, key)
-    logits.add_(bias)
+    logits = tinygrad.Tensor.einsum(logits_formula, query * scale, key)
+    logits = logits + bias
     attn = softmax(logits, dim=-1, in_place=not return_edge)
-    out = torch.einsum("...ij, ...jd -> ...id", attn, value)
+    attn = to_tinygrad(attn)
+    out = tinygrad.Tensor.einsum(out_formula, attn, value)
     if return_edge:
-        attn = getattr(attn, edge_reduction)(dim=edge_reduction_dim)
+        attn = getattr(attn, edge_reduction)(axis=edge_reduction_dim)
         return out, attn
     else:
         return out, None
@@ -208,14 +175,23 @@ def attention(
         The aggregated tensor of shape (*_q, dim_v)
 
     """
+    query = to_tinygrad(query)
+    key = to_tinygrad(key)
+    value = to_tinygrad(value)
     q_length, k_length, v_dim = query.shape[-2], key.shape[-2], value.shape[-1]
     subbatch_size = subbatch_size or q_length
 
     batch_shape = list(query.shape[:-2])
-    factory_kwargs = nn.factory_kwargs(
-        {"device": query.device, "dtype": query.dtype}
-    )
-    output = torch.empty(*batch_shape, q_length, v_dim, **factory_kwargs)
+
+    output = tinygrad.Tensor.empty(*batch_shape, q_length, v_dim, device=query.device, dtype=query.dtype)
+    factory_kwargs = {"device": query.device, "dtype": query.dtype}
+
+    # stop tinygrad reimplementation here
+    output = to_torch(output)
+    query = to_torch(query)
+    key = to_torch(key)
+    value = to_torch(value)
+
     if return_edge:
         batch_shape.pop(edge_reduction_dim + 2)
         attns = torch.empty(
@@ -232,12 +208,12 @@ def attention(
             b_i = bias[..., start:end, :]
 
         res, attn = _attention(
-            q_i, key, scale, value, b_i, return_edge,
+            to_tinygrad(q_i), to_tinygrad(key), to_tinygrad(scale), to_tinygrad(value), to_tinygrad(b_i), return_edge,
             edge_reduction, edge_reduction_dim
         )
-        output[..., start:end, :] = res
+        output[..., start:end, :] = to_torch(res)
         if return_edge:
-            attns[..., start:end, :] = attn
+            attns[..., start:end, :] = to_torch(attn)
 
     return output, attns
 
