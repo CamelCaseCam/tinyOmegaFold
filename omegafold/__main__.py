@@ -17,6 +17,8 @@
 """
 The main function to run the prediction
 """
+
+STRICT_ERROR = True
 # =============================================================================
 # Imports
 # =============================================================================
@@ -70,16 +72,23 @@ def main():
             f"{len(input_data[0]['p_msa'][0])} residues in this chain."
         )
         ts = time.time()
-        try:
+        if STRICT_ERROR:
             output = model(
                     input_data,
                     predict_with_confidence=True,
                     fwd_cfg=forward_config
                 )
-        except RuntimeError as e:
-            logging.info(f"Failed to generate {save_path} due to {e}")
-            logging.info(f"Skipping...")
-            continue
+        else:
+            try:
+                output = model(
+                        input_data,
+                        predict_with_confidence=True,
+                        fwd_cfg=forward_config
+                    )
+            except RuntimeError as e:
+                logging.info(f"Failed to generate {save_path} due to {e}")
+                logging.info(f"Skipping...")
+                continue
         logging.info(f"Finished prediction in {time.time() - ts:.2f} seconds.")
 
         logging.info(f"Saving prediction to {save_path}")

@@ -24,10 +24,48 @@ import argparse
 import numbers
 import typing
 
+import tinygrad.device
+import tinygrad.tensor
 import torch
 from torch import nn
+import tinygrad
+## TESTING
+import numpy as np
 
 from omegafold import utils
+
+dt2tg = { torch.float32: tinygrad.dtypes.float32, torch.float64: tinygrad.dtypes.float64 }
+dv2tg = { torch.device('cpu'): "cpu", torch.device('cuda', index=0): "gpu" }
+dv2trch = { "cpu": torch.device('cpu'), "gpu": torch.device('cuda', index=0), "CPU" : torch.device('cpu'), "GPU": torch.device('cuda', index=0) }
+
+def to_tinygrad(x: torch.Tensor, checknan=False) -> tinygrad.Tensor:
+    if x is None:
+        return None
+    if checknan:
+        if isinstance(x, torch.Tensor):
+            xnp = x.cpu().numpy()
+        else:
+            xnp = x.numpy()
+        if np.isnan(xnp).any():
+            if isinstance(x, torch.Tensor):
+                return to_tinygrad(torch.nan_to_num(x))
+            return to_tinygrad(to_torch(x))
+        return tinygrad.Tensor(xnp, device=dv2tg[x.device]) if isinstance(x, torch.Tensor) else x
+    return tinygrad.Tensor(x.cpu().numpy(), device=dv2tg[x.device]) if isinstance(x, torch.Tensor) else x
+
+def to_torch(x: tinygrad.Tensor, device: typing.Optional[torch.device] = None) -> torch.Tensor:
+    if x is None:
+        return None
+    x = x.realize()
+    if device is not None:
+        t = torch.tensor(x.numpy(), requires_grad=False, device=device)
+        if t.isnan().any():
+            return torch.nan_to_num(t)
+        return t
+    t = torch.tensor(x.numpy(), requires_grad=False)
+    if t.isnan().any():
+        return torch.nan_to_num(t)
+    return t
 
 
 # =============================================================================
@@ -55,27 +93,21 @@ def softmax(
     Returns:
 
     """
-    if in_place:
-        max_val = torch.max(x, dim=dim, keepdim=True)[0]
-        torch.sub(x, max_val, out=x)
-        torch.exp(x, out=x)
-        summed = torch.sum(x, dim=dim, keepdim=True)
-        x /= summed
-        return x
-    else:
-        return torch.softmax(input=x, dim=dim, dtype=dtype)
+    x = to_tinygrad(x, checknan=True)
 
+    ### In place removed because tinygrad's kernel fusion makes it redundant
+    return to_torch(x.softmax(axis=dim), device=dv2trch[x.device])
 
-def _attention(
-        query: torch.Tensor,
-        key: torch.Tensor,
-        scale: torch.Tensor,
-        value: torch.Tensor,
-        bias: torch.Tensor,
+'''def _attention(
+        query: tinygrad.Tensor,
+        key: tinygrad.Tensor,
+        scale: tinygrad.Tensor,
+        value: tinygrad.Tensor,
+        bias: tinygrad.Tensor,
         return_edge: bool,
         edge_reduction: str,
         edge_reduction_dim: int
-) -> typing.Tuple[torch.Tensor, typing.Optional[torch.Tensor]]:
+) -> typing.Tuple[tinygrad.Tensor, typing.Optional[tinygrad.Tensor]]:
     """Normal attention
 
     Args:
@@ -90,6 +122,52 @@ def _attention(
         The aggregated tensor of shape (*_q, dim_v)
 
     """
+    logits = tinygrad.Tensor.einsum("bid, bjd -> bij", (query * scale), key)    # TODO: fix this. Tinygrad does not support arbitrary einsum indices but they should fix this soon. If not, replace it after exams
+    logits.add(bias)
+    attn = softmax(logits, dim=-1, in_place=not return_edge)
+    attn = to_tinygrad(attn)
+    out = tinygrad.Tensor.einsum("bij, bjd -> bid", attn, value)
+    if return_edge:
+        attr = getattr(attn, edge_reduction) # Returns sum
+        attn = attr(axis=edge_reduction_dim)
+        return out, attn
+    else:
+        return out, None'''
+def _attention(
+        query: tinygrad.Tensor,
+        key: tinygrad.Tensor,
+        scale: tinygrad.Tensor,
+        value: tinygrad.Tensor,
+        bias: tinygrad.Tensor,
+        return_edge: bool,
+        edge_reduction: str,
+        edge_reduction_dim: int
+) -> typing.Tuple[tinygrad.Tensor, typing.Optional[tinygrad.Tensor]]:
+    """Normal attention
+
+    Args:
+        query: positive tensor of shape (*_q, dim_qk)
+        key: positive tensor of shape (*_k, dim_qk)
+        scale: the scaling of logits
+        value: tensor of shape (*_k, dim_v)
+        bias: the bias acting as either mask or relative positional encoding
+        return_edge: if to return the logits of attention
+
+    Returns:
+        The aggregated tensor of shape (*_q, dim_v)
+
+    """
+    q_shape = query.shape
+    k_shape = key.shape
+    v_shape = value.shape
+    
+    # Define einsum formulae for different shapes
+    einsum_formulae = {
+        (2, 2, 2): ("id, jd -> ij", "ij, jd -> id"),
+        (3, 3, 3): ("bid, bjd -> bij", "bij, bjd -> bid"),
+        (5, 5, 5): ("abcid, abcjd -> abcij", "abcij, abcjd -> abcid")
+    }
+    
     logits = torch.einsum("...id, ...jd -> ...ij", query * scale, key)
     logits.add_(bias)
     attn = softmax(logits, dim=-1, in_place=not return_edge)
