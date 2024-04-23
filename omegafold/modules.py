@@ -56,14 +56,12 @@ def to_tinygrad(x: torch.Tensor, checknan=False) -> tinygrad.Tensor:
 def to_torch(x: tinygrad.Tensor, device: typing.Optional[torch.device] = None) -> torch.Tensor:
     if x is None:
         return None
-    if device is None:
-        device = dv2trch[x.device]
     if not isinstance(x, tinygrad.Tensor):
         return x
+    if device is None:
+        device = dv2trch[x.device]
     x = x.realize()
     t = torch.tensor(x.numpy(), requires_grad=False, device=device)
-    if t.isnan().any():
-        return torch.nan_to_num(t)
     return t
 
 
@@ -176,26 +174,21 @@ def attention(
 
     """
     query = to_tinygrad(query)
+    scale = to_tinygrad(scale)
     key = to_tinygrad(key)
     value = to_tinygrad(value)
+    bias = to_tinygrad(bias)
     q_length, k_length, v_dim = query.shape[-2], key.shape[-2], value.shape[-1]
     subbatch_size = subbatch_size or q_length
 
     batch_shape = list(query.shape[:-2])
 
     output = tinygrad.Tensor.empty(*batch_shape, q_length, v_dim, device=query.device, dtype=query.dtype)
-    factory_kwargs = {"device": query.device, "dtype": query.dtype}
-
-    # stop tinygrad reimplementation here
-    output = to_torch(output)
-    query = to_torch(query)
-    key = to_torch(key)
-    value = to_torch(value)
 
     if return_edge:
         batch_shape.pop(edge_reduction_dim + 2)
-        attns = torch.empty(
-            *batch_shape, q_length, k_length, **factory_kwargs
+        attns = tinygrad.Tensor.empty(
+            *batch_shape, q_length, k_length, device=query.device, dtype=query.dtype
         )
     else:
         attns = None
@@ -208,14 +201,18 @@ def attention(
             b_i = bias[..., start:end, :]
 
         res, attn = _attention(
-            to_tinygrad(q_i), to_tinygrad(key), to_tinygrad(scale), to_tinygrad(value), to_tinygrad(b_i), return_edge,
+            q_i, key, scale, value, b_i, return_edge,
             edge_reduction, edge_reduction_dim
         )
-        output[..., start:end, :] = to_torch(res)
-        if return_edge:
-            attns[..., start:end, :] = to_torch(attn)
 
-    return output, attns
+        output[..., start:end, :] = res
+        if return_edge:
+            attns[..., start:end, :] = attn
+
+    # stop tinygrad reimplementation here
+    output = to_torch(output)
+
+    return output, to_torch(attns)
 
 
 # =============================================================================
