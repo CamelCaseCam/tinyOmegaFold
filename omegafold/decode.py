@@ -206,20 +206,15 @@ class TorsionAngleHead(modules.OFModule):
     def __init__(self, cfg: argparse.Namespace):
         super(TorsionAngleHead, self).__init__(cfg)
 
-        self.input_projection = nn.ModuleList(
-            [nn.Linear(
-                cfg.node_dim, cfg.num_channel
-            ) for _ in range(2)]
-        )
+        self.input_projection = [nn.Linear(
+            cfg.node_dim, cfg.num_channel
+        ) for _ in range(2)]
 
-        self.resblock1 = nn.ModuleList(
-            [nn.Linear(cfg.num_channel, cfg.num_channel)
-             for _ in range(cfg.num_residual_block)]
-        )
-        self.resblock2 = nn.ModuleList(
-            [nn.Linear(cfg.num_channel, cfg.num_channel)
-             for _ in range(cfg.num_residual_block)]
-        )
+        self.resblock1 = [nn.Linear(cfg.num_channel, cfg.num_channel)
+            for _ in range(cfg.num_residual_block)]
+        
+        self.resblock2 = [nn.Linear(cfg.num_channel, cfg.num_channel)
+            for _ in range(cfg.num_residual_block)]
 
         self.unnormalized_angles = nn.Linear(cfg.num_channel, 14)
 
@@ -265,12 +260,11 @@ class StructureCycle(modules.OFModule):
         )
         self.ipa = InvariantPointAttention(cfg)
         self.input_norm = nn.LayerNorm(cfg.node_dim)
-        self.transition = nn.ModuleList(
-            [
-                nn.Linear(cfg.node_dim, cfg.node_dim) for _ in
-                range(cfg.num_transition)
-            ]
-        )
+        self.transition = [
+            nn.Linear(cfg.node_dim, cfg.node_dim) for _ in
+            range(cfg.num_transition)
+        ]
+        
         self.update_norm = nn.LayerNorm(cfg.node_dim)
 
         self.affine_update = nn.Linear(cfg.node_dim, 6)
@@ -322,9 +316,7 @@ class StructureModule(modules.OFModule):
         self.edge_norm = nn.LayerNorm(cfg.edge_dim)
         self.init_proj = nn.Linear(cfg.node_dim, cfg.node_dim)
 
-        self.cycles = nn.ModuleList(
-            [StructureCycle(cfg) for _ in range(cfg.num_cycle)]
-        )
+        self.cycles = [StructureCycle(cfg) for _ in range(cfg.num_cycle)]
 
         self.torsion_angle_pred = TorsionAngleHead(cfg)
 

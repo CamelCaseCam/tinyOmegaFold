@@ -28,6 +28,7 @@ from torch import nn
 
 from omegafold import modules, utils
 from omegafold.utils import residue_constants as rc
+from omegafold.utils.conversion import Module
 
 
 # =============================================================================
@@ -138,7 +139,7 @@ class EdgeEmbedder(modules.OFModule):
         return out
 
 
-class RoPE(nn.Module):
+class RoPE(Module):
     """The RoPE module
 
     Attributes:
@@ -158,9 +159,7 @@ class RoPE(nn.Module):
         freq_seq = torch.arange(self.half_size, dtype=torch.float32)
         freq_seq = -freq_seq.div(float(self.half_size))
 
-        self.register_buffer(
-            "inv_freq", torch.pow(10000., freq_seq), persistent=False
-        )
+        self.inv_freq = torch.pow(10000., freq_seq)
 
     def forward(
             self, tensor: torch.Tensor, seq_dim: typing.Union[int, tuple]

@@ -54,7 +54,8 @@ def main():
             state_dict = state_dict.pop("model")
         model.load_state_dict(state_dict)
     model.eval()
-    model.to(args.device)
+    # Compatibility with tinygrad - we will use tinygrad device format
+    model.to("GPU" if args.device == "cuda" else args.device)
 
     logging.info(f"Reading {args.input_file}")
     for i, (input_data, save_path) in enumerate(

@@ -26,6 +26,7 @@ import typing
 
 import tinygrad.device
 import tinygrad.tensor
+from tinygrad import nn as tnn
 import torch
 from torch import nn
 import tinygrad
@@ -33,6 +34,7 @@ import tinygrad
 import numpy as np
 
 from omegafold import utils
+from omegafold.utils.conversion import Module, Sequential
 
 dt2tg = { torch.float32: tinygrad.dtypes.float32, torch.float64: tinygrad.dtypes.float64 }
 dv2tg = { torch.device('cpu'): "cpu", torch.device('cuda', index=0): "gpu" }
@@ -219,7 +221,7 @@ def attention(
 # Classes
 # =============================================================================
 
-class OFModule(nn.Module):
+class OFModule(Module):
     """
     The OmegaFold modules
         args: The arguments used for each of the modules
@@ -229,18 +231,24 @@ class OFModule(nn.Module):
             self,
             cfg: typing.Optional[argparse.Namespace]
     ) -> None:
-        super(OFModule, self).__init__()
+        #super(OFModule, self).__init__()
         self.cfg = cfg
 
     @property
     def device(self) -> torch.device:
-        return next(self.parameters()).device
+        return self.getdevice()
 
     @property
     def dtype(self) -> torch.dtype:
-        return next(self.parameters()).dtype
+        return self.getdtype()
 
 
+activations = {
+    "relu": tinygrad.Tensor.relu,
+    "leaky_relu": tinygrad.Tensor.leakyrelu,
+    "sigmoid": tinygrad.Tensor.sigmoid,
+    "tanh": tinygrad.Tensor.tanh,
+}
 class Transition(OFModule):
     def __init__(self, d: int, n: int, activation: str) -> None:
         super(Transition, self).__init__(None)
@@ -250,7 +258,7 @@ class Transition(OFModule):
             act = getattr(nn, activation)(inplace=True)
         except TypeError:
             act = getattr(nn, activation)()
-        self.network = nn.Sequential(fc1, act, fc2)
+        self.network = Sequential(fc1, act, fc2)
 
     def forward(
             self,
@@ -367,10 +375,8 @@ class Val2Bins(OFModule):
 
     def __init__(self, cfg: argparse.Namespace) -> None:
         super(Val2Bins, self).__init__(cfg)
-        self.register_buffer(
-            "breaks", torch.linspace(
+        self.breaks = torch.linspace(   # BUG: (potentially) may cause issue when loading from state dict
                 cfg.first_break, cfg.last_break, cfg.num_bins - 1
-            ), persistent=False
         )
 
     def forward(self, dist: torch.Tensor) -> torch.Tensor:

@@ -72,14 +72,12 @@ class GeoFormerBlock(modules.OFModule):
         self.out_product = modules.Node2Edge(
             in_dim=cfg.node_dim, out_dim=cfg.edge_dim, proj_dim=cfg.opm_dim
         )
-        self.geometric_attention = nn.ModuleList(
-            [modules.GeometricAttention(
-                d_edge=cfg.edge_dim,
-                n_axis=2,
-                c=cfg.geom_c,
-                n_head=cfg.geom_head
-            ) for _ in range(cfg.geom_count)]
-        )
+        self.geometric_attention = [modules.GeometricAttention(
+            d_edge=cfg.edge_dim,
+            n_axis=2,
+            c=cfg.geom_c,
+            n_head=cfg.geom_head
+        ) for _ in range(cfg.geom_count)]
         self.edge_transition = modules.Transition(
             d=cfg.edge_dim,
             n=cfg.transition_multiplier,
@@ -140,9 +138,7 @@ class GeoFormerBlock(modules.OFModule):
 class GeoFormer(modules.OFModule):
     def __init__(self, cfg: argparse.Namespace):
         super(GeoFormer, self).__init__(cfg)
-        self.blocks = nn.ModuleList(
-            [GeoFormerBlock(cfg) for _ in range(cfg.geo_num_blocks)]
-        )
+        self.blocks = [GeoFormerBlock(cfg) for _ in range(cfg.geo_num_blocks)]
         self.node_final_proj = nn.Linear(cfg.node_dim, cfg.struct.node_dim)
 
     def forward(

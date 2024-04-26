@@ -28,6 +28,7 @@ import torch
 from torch import nn
 
 from omegafold import embedders, modules, utils
+from omegafold.utils.conversion import Module, Sequential
 
 
 # =============================================================================
@@ -61,7 +62,7 @@ class GatedAttentionUnit(modules.OFModule):
     def __init__(self, cfg: argparse.Namespace):
         super(GatedAttentionUnit, self).__init__(cfg)
         self.cfg = cfg
-        self.gva_proj = nn.Sequential(
+        self.gva_proj = Sequential(
             nn.Linear(cfg.node, cfg.proj_dim * 2 + cfg.attn_dim),
             nn.SiLU()
         )
@@ -116,6 +117,10 @@ class GatedAttentionUnit(modules.OFModule):
         node = node * gates
         node = self.output_proj(node)
         return node, edge
+
+    # Debug to
+    def to(self, device):
+        return super().to(device)
 
 
 class OmegaPLMLayer(modules.OFModule):
@@ -176,9 +181,7 @@ class OmegaPLM(modules.OFModule):
         self.input_embedding = nn.Embedding(
             cfg.alphabet_size, cfg.node, padding_idx=cfg.padding_idx
         )
-        self.layers = nn.ModuleList(
-            [OmegaPLMLayer(cfg) for _ in range(cfg.edge)]
-        )
+        self.layers = [OmegaPLMLayer(cfg) for _ in range(cfg.edge)]
         self.output_norm = nn.LayerNorm(cfg.node)
 
     def forward(
