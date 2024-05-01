@@ -1,7 +1,15 @@
 import tinygrad.device
 import torch
 import tinygrad
+import tinygrad.nn
 import numpy as np
+
+# Only on Cameron's machine because CUDA is bricked
+import os
+DEBUG = False
+if os.environ.get('USER') == 'cameronk':
+    tinygrad.Device.DEFAULT = "GPU" # No CUDA!
+    DEBUG = True
 
 
 dt2tg = { torch.float32: tinygrad.dtypes.float32, torch.float64: tinygrad.dtypes.float64 }
@@ -77,6 +85,10 @@ class Module:
             # Add Tinygrad Tensors directly
             outdict[prefix[:-1]] = var
 
+        elif isinstance(var, tinygrad.nn.Linear):
+            outdict[f"{prefix[:-1]}.weight"] = var.weight
+            outdict[f"{prefix[:-1]}.bias"] = var.bias
+
     def parameters(self, prefix=""):
         """
         Returns a dictionary of parameter IDs and values within the Module and its submodules.
@@ -90,6 +102,8 @@ class Module:
 
         params_dict = {}
         for name, obj in self.__dict__.items():
+            # Debug (if ends in _DEBUGk where k is a single character)
+            name = name[:-7] if name[-7:-1] == "_DEBUG" else name
             newprefix = f"{prefix}.{name}." if prefix else f"{name}."
             self._param_from_var(newprefix, obj, params_dict)
 
@@ -127,11 +141,11 @@ class Module:
                     raise ValueError(f"Shape mismatch for '{param_id}'. Expected {param.shape}, found {sd_val.shape}")
 
                 # Load Tinygrad tensor data
-                tg_val = to_tinygrad(sd_val)
+                np_val = sd_val.cpu().numpy() if isinstance(sd_val, torch.Tensor) else sd_val
                 # This would be dangerous if we weren't about to overwrite the values
-                param.lazydata.device = tg_val.device
-                param.lazydata.dtype = tg_val.dtype
-                param.assign(tg_val)
+                param.lazydata.device = dv2tg[sd_val.device]
+                param.lazydata.dtype = dt2tg[sd_val.dtype]
+                param.__init__(np_val, device=dv2tg[sd_val.device], dtype=dt2tg[sd_val.dtype])
             else:
                 raise TypeError(f"Unsupported parameter type: {type(param)}")
     def eval(self):
@@ -166,8 +180,10 @@ class Module:
                 tg_device = device if isinstance(device, str) else dv2tg[device]
                 # Dangerous but necessary hack to change the device in-place
                 dev_var = param.to(tg_device)
+                # TODO: This doesn't work - some buffers are not being moved to the correct device
                 param.lazydata.device = dev_var.device
-                param.assign(dev_var)
+                dev_varn = dev_var.numpy()
+                param.__init__(dev_varn, device=dev_var.device, dtype=dev_var.dtype)
             else:
                 raise TypeError(f"Unsupported parameter type: {type(param)}")
 
@@ -244,6 +260,11 @@ class Module:
                 for tensor in self._alltensors_var(obj):
                     if tensor is not None:
                         yield tensor
+        # Necessary hack
+        elif isinstance(var, tinygrad.nn.Linear):
+            yield var.weight
+            yield var.bias
+
     
     def alltensors(self):
         """
@@ -306,6 +327,12 @@ class Sequential(Module):
             module_prefix = f"{prefix}{i}." if prefix else str(i) + "."
             self._param_from_var(module_prefix, module, params_dict)
         return params_dict
+    
+    def alltensors(self):
+        for module in self.modules:
+            for tensor in self._alltensors_var(module):
+                if tensor is not None:
+                    yield tensor
     
 if __name__ == "__main__":
     model = torch.nn.Sequential(

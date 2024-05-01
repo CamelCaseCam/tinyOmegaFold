@@ -36,9 +36,9 @@ import numpy as np
 from omegafold import utils
 from omegafold.utils.conversion import Module, Sequential
 
-dt2tg = { torch.float32: tinygrad.dtypes.float32, torch.float64: tinygrad.dtypes.float64 }
-dv2tg = { torch.device('cpu'): "cpu", torch.device('cuda', index=0): "gpu" }
-dv2trch = { "cpu": torch.device('cpu'), "gpu": torch.device('cuda', index=0), "CPU" : torch.device('cpu'), "GPU": torch.device('cuda', index=0) }
+dt2tg = { torch.float32: tinygrad.dtypes.float32, torch.float64: tinygrad.dtypes.float64, None: None }
+dv2tg = { torch.device('cpu'): "clang", torch.device('cuda', index=0): "gpu" }
+dv2trch = { "clang": torch.device('cpu'), "gpu": torch.device('cuda', index=0), "CLANG" : torch.device('cpu'), "GPU": torch.device('cuda', index=0) }
 
 def to_tinygrad(x: torch.Tensor, checknan=False) -> tinygrad.Tensor:
     if x is None:
@@ -252,12 +252,12 @@ activations = {
 class Transition(OFModule):
     def __init__(self, d: int, n: int, activation: str) -> None:
         super(Transition, self).__init__(None)
-        fc1 = nn.Linear(d, n * d)
-        fc2 = nn.Linear(n * d, d)
+        fc1 = tnn.Linear(d, n * d)
+        fc2 = tnn.Linear(n * d, d)
         try:
-            act = getattr(nn, activation)(inplace=True)
-        except TypeError:
-            act = getattr(nn, activation)()
+            act = activations[activation.lower()]
+        except:
+            raise ValueError(f"Activation {activation} not supported")
         self.network = Sequential(fc1, act, fc2)
 
     def forward(
@@ -265,14 +265,17 @@ class Transition(OFModule):
             x: torch.Tensor,
             subbatch_size: typing.Optional[int]
     ) -> torch.Tensor:
+        x = to_tinygrad(x)
         subbatch_size = subbatch_size or x.shape[-2]
 
-        out = torch.empty_like(x)
+        out = tinygrad.Tensor.empty(x.shape, device=x.device, dtype=x.dtype)
         for i, x_i in enumerate(x.split(subbatch_size, dim=0)):
             start, end = i * subbatch_size, (i + 1) * subbatch_size
+            x_i = to_torch(x_i)
             x_i = utils.normalize(x_i)
+            x_i = to_tinygrad(x_i)
             out[start:end] = self.network(x_i)
-        return out
+        return to_torch(out)
 
 
 class MultiHeadedScaling(OFModule):
@@ -307,8 +310,8 @@ class MultiHeadedScaling(OFModule):
         shape.insert(0, num_heads)
         self.shape = shape
         self.split_dims = [1] * num_heads
-        self.weight = nn.Parameter(torch.empty(self.shape, **factory_kwargs))
-        self.bias = nn.Parameter(torch.empty(self.shape, **factory_kwargs))
+        self.weight = tinygrad.Tensor.empty(self.shape, dtype=dt2tg[dtype])
+        self.bias = tinygrad.Tensor.empty(self.shape, dtype=dt2tg[dtype])
         self.call_on_out_ready = on_out_ready
 
         self.reset_parameters()
@@ -325,18 +328,21 @@ class MultiHeadedScaling(OFModule):
             A output tensor of the same shape
 
         """
+        x = to_tinygrad(x)
         x = x.unsqueeze(self.unsqueeze_dim) * self.weight + self.bias
         positive_index = x.ndim + self.unsqueeze_dim
         if self.call_on_out_ready is not None:
+            x = to_torch(x)
             x = self.call_on_out_ready(x)
+            x = to_tinygrad(x)
 
         x = x.split(self.split_dims, dim=positive_index)
 
-        return [x_i.squeeze(positive_index) for x_i in x]
+        return [to_torch(x_i.squeeze(positive_index)) for x_i in x]
 
     def reset_parameters(self):
-        nn.init.normal_(self.weight, std=0.02)
-        nn.init.zeros_(self.bias)
+        self.weight = tinygrad.Tensor.normal(self.weight.shape, std=0.02, dtype=self.weight.dtype)
+        self.bias = tinygrad.Tensor.zeros(self.bias.shape, dtype=self.bias.dtype)
 
 
 class Val2ContBins(OFModule):
