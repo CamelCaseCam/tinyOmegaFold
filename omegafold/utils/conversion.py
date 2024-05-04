@@ -68,6 +68,11 @@ def extract_and_print_state_dict(model_path):
         print(key)
 
 class Module:
+    def no_load(self, var):
+        if not hasattr(self, 'noload'):
+            self.noload = []
+        self.noload.append(var)
+
     def _param_from_var(self, prefix, var, outdict):
         """
         Tries to add the variable to the outdict. 
@@ -115,6 +120,9 @@ class Module:
 
         params_dict = {}
         for name, obj in self.__dict__.items():
+            # Exclude objects that should not be loaded
+            if hasattr(self, 'noload') and name in self.noload:
+                continue
             # Debug (if ends in _DEBUGk where k is a single character)
             name = name[:-7] if name[-7:-1] == "_DEBUG" else name
             newprefix = f"{prefix}.{name}." if prefix else f"{name}."

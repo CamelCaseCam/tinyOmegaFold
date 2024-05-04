@@ -40,11 +40,11 @@ import tinygrad
 # Functions
 # =============================================================================
 def _get_pos(
-        shape: torch.Size,
-        device: torch.device,
-        dtype: torch.dtype,
+        shape,
+        device,
+        dtype,
         seq_dim: typing.Tuple[int, ...]
-) -> torch.Tensor:
+) -> tinygrad.Tensor:
     """Get the position of the tokens given
 
     Args:
@@ -61,18 +61,18 @@ def _get_pos(
     total_len = 1
     for i in spatial_shape:
         total_len *= i
-    position = tinygrad.Tensor.arange(total_len, dtype=dt2tg[dtype], device=dv2tg[device])
+    position = tinygrad.Tensor.arange(total_len, dtype=dtype, device=device)
     position = position.reshape(*spatial_shape)
 
-    return to_torch(position)
+    return position
 
 
 def _apply_embed(
-        inputs: torch.Tensor,
-        sin: torch.Tensor,
-        cos: torch.Tensor,
+        inputs: tinygrad.Tensor,
+        sin: tinygrad.Tensor,
+        cos: tinygrad.Tensor,
         seq_dim: typing.Tuple[int, ...]
-) -> torch.Tensor:
+) -> tinygrad.Tensor:
     """Applies RoPE to ~inputs
 
     Args:
@@ -89,9 +89,6 @@ def _apply_embed(
         tensor with RoPE applied.
 
     """
-    inputs = to_tinygrad(inputs)
-    sin = to_tinygrad(sin)
-    cos = to_tinygrad(cos)
     gaps = [
         (seq_dim[i + 1] - seq_dim[i]) == 1 for i in range(len(seq_dim) - 1)
     ]
@@ -113,7 +110,7 @@ def _apply_embed(
 
     # Apply RoPE
     x1, x2 = tinygrad.Tensor.split(inputs, inputs.shape[-1] // 2, dim=-1)
-    return to_torch(tinygrad.Tensor.cat(x1 * cos - x2 * sin, x2 * cos + x1 * sin, dim=-1))
+    return tinygrad.Tensor.cat(x1 * cos - x2 * sin, x2 * cos + x1 * sin, dim=-1)
 
 
 # =============================================================================
@@ -161,10 +158,12 @@ class RoPE(Module):
             )
         self.input_dim = input_dim
         self.half_size = input_dim // 2
-        freq_seq = torch.arange(self.half_size, dtype=torch.float32)
+        freq_seq = tinygrad.Tensor.arange(self.half_size, dtype=tinygrad.dtypes.float32)
         freq_seq = -freq_seq.div(float(self.half_size))
 
-        self.inv_freq = torch.pow(10000., freq_seq)
+        base = tinygrad.Tensor.full_like(freq_seq, 10000.)
+        self.inv_freq = base.pow(freq_seq)
+        self.no_load("inv_freq")
 
     def forward(
             self, tensor: torch.Tensor, seq_dim: typing.Union[int, tuple]
@@ -178,15 +177,16 @@ class RoPE(Module):
         Returns:
 
         """
+        tensor = to_tinygrad(tensor)
         if isinstance(seq_dim, int):
             seq_dim = [seq_dim, ]
         sin, cos = self._compute_sin_cos(tensor, seq_dim)
 
-        return _apply_embed(tensor, sin, cos, seq_dim)
+        return to_torch(_apply_embed(tensor, sin, cos, seq_dim))
 
     def _compute_sin_cos(
-            self, tensor: torch.Tensor, seq_dim: typing.Tuple[int]
-    ) -> typing.Tuple[torch.Tensor, torch.Tensor]:
+            self, tensor: tinygrad.Tensor, seq_dim: typing.Tuple[int]
+    ) -> typing.Tuple[tinygrad.Tensor, tinygrad.Tensor]:
         """Compute sine and cosine tensors
 
         Args:
@@ -199,8 +199,8 @@ class RoPE(Module):
 
         """
         position = _get_pos(tensor.shape, tensor.device, tensor.dtype, seq_dim)
-        sinusoid = torch.einsum("..., d->...d", position, self.inv_freq)
-        sin, cos = torch.sin(sinusoid), torch.cos(sinusoid)
+        sinusoid = tinygrad.Tensor.einsum("b, d->bd", position, self.inv_freq)     # Will cause errors
+        sin, cos = sinusoid.sin(), sinusoid.cos()
         return sin, cos
 
 
