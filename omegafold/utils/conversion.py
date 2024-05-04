@@ -3,6 +3,7 @@ import torch
 import tinygrad
 import tinygrad.nn
 import numpy as np
+import typing
 
 # Only on Cameron's machine because CUDA is bricked
 import os
@@ -12,9 +13,10 @@ if os.environ.get('USER') == 'cameronk':
     DEBUG = True
 
 
-dt2tg = { torch.float32: tinygrad.dtypes.float32, torch.float64: tinygrad.dtypes.float64 }
+dt2tg = { torch.float32: tinygrad.dtypes.float32, torch.float64: tinygrad.dtypes.float64, None: None }
 dv2tg = { torch.device('cpu'): "clang", torch.device('cuda', index=0): "gpu" }
 dv2trch = { "clang": torch.device('cpu'), "gpu": torch.device('cuda', index=0), "CLANG" : torch.device('cpu'), "GPU": torch.device('cuda', index=0) }
+
 def to_tinygrad(x: torch.Tensor, checknan=False) -> tinygrad.Tensor:
     if x is None:
         return None
@@ -29,6 +31,17 @@ def to_tinygrad(x: torch.Tensor, checknan=False) -> tinygrad.Tensor:
             return to_tinygrad(to_torch(x))
         return tinygrad.Tensor(xnp, device=dv2tg[x.device]) if isinstance(x, torch.Tensor) else x
     return tinygrad.Tensor(x.cpu().numpy(), device=dv2tg[x.device]) if isinstance(x, torch.Tensor) else x
+
+def to_torch(x: tinygrad.Tensor, device: typing.Optional[torch.device] = None) -> torch.Tensor:
+    if x is None:
+        return None
+    if not isinstance(x, tinygrad.Tensor):
+        return x
+    if device is None:
+        device = dv2trch[x.device]
+    x = x.realize()
+    t = torch.tensor(x.numpy(), requires_grad=False, device=device)
+    return t
 
 def extract_and_print_state_dict(model_path):
     """

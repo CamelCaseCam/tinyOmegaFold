@@ -34,37 +34,7 @@ import tinygrad
 import numpy as np
 
 from omegafold import utils
-from omegafold.utils.conversion import Module, Sequential
-
-dt2tg = { torch.float32: tinygrad.dtypes.float32, torch.float64: tinygrad.dtypes.float64, None: None }
-dv2tg = { torch.device('cpu'): "clang", torch.device('cuda', index=0): "gpu" }
-dv2trch = { "clang": torch.device('cpu'), "gpu": torch.device('cuda', index=0), "CLANG" : torch.device('cpu'), "GPU": torch.device('cuda', index=0) }
-
-def to_tinygrad(x: torch.Tensor, checknan=False) -> tinygrad.Tensor:
-    if x is None:
-        return None
-    if checknan:
-        if isinstance(x, torch.Tensor):
-            xnp = x.cpu().numpy()
-        else:
-            xnp = x.numpy()
-        if np.isnan(xnp).any():
-            if isinstance(x, torch.Tensor):
-                return to_tinygrad(torch.nan_to_num(x))
-            return to_tinygrad(to_torch(x))
-        return tinygrad.Tensor(xnp, device=dv2tg[x.device]) if isinstance(x, torch.Tensor) else x
-    return tinygrad.Tensor(x.cpu().numpy(), device=dv2tg[x.device]) if isinstance(x, torch.Tensor) else x
-
-def to_torch(x: tinygrad.Tensor, device: typing.Optional[torch.device] = None) -> torch.Tensor:
-    if x is None:
-        return None
-    if not isinstance(x, tinygrad.Tensor):
-        return x
-    if device is None:
-        device = dv2trch[x.device]
-    x = x.realize()
-    t = torch.tensor(x.numpy(), requires_grad=False, device=device)
-    return t
+from omegafold.utils.conversion import Module, Sequential, to_tinygrad, to_torch, dt2tg, dv2trch, dv2tg
 
 
 # =============================================================================

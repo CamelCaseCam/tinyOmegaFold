@@ -28,7 +28,8 @@ from torch import nn
 
 from omegafold import modules, utils
 from omegafold.utils import residue_constants as rc
-from omegafold.utils.conversion import Module
+from omegafold.utils.conversion import Module, dt2tg, dv2tg, to_torch, to_tinygrad
+import tinygrad
 
 
 # =============================================================================
@@ -59,10 +60,10 @@ def _get_pos(
     total_len = 1
     for i in spatial_shape:
         total_len *= i
-    position = torch.arange(total_len, dtype=dtype, device=device)
+    position = tinygrad.Tensor.arange(total_len, dtype=dt2tg[dtype], device=dv2tg[device])
     position = position.reshape(*spatial_shape)
 
-    return position
+    return to_torch(position)
 
 
 def _apply_embed(
