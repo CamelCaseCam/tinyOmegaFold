@@ -23,6 +23,7 @@
 import argparse
 import typing
 
+import tinygrad.tensor
 import torch
 from torch import nn
 
@@ -88,6 +89,9 @@ def _apply_embed(
         tensor with RoPE applied.
 
     """
+    inputs = to_tinygrad(inputs)
+    sin = to_tinygrad(sin)
+    cos = to_tinygrad(cos)
     gaps = [
         (seq_dim[i + 1] - seq_dim[i]) == 1 for i in range(len(seq_dim) - 1)
     ]
@@ -108,8 +112,8 @@ def _apply_embed(
         cos = cos.unsqueeze(_)
 
     # Apply RoPE
-    x1, x2 = torch.split(inputs, inputs.shape[-1] // 2, dim=-1)
-    return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)
+    x1, x2 = tinygrad.Tensor.split(inputs, inputs.shape[-1] // 2, dim=-1)
+    return to_torch(tinygrad.Tensor.cat(x1 * cos - x2 * sin, x2 * cos + x1 * sin, dim=-1))
 
 
 # =============================================================================
