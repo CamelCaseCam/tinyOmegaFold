@@ -541,7 +541,7 @@ class AttentionWEdgeBias(OFModule):
             attn_c: int
     ) -> None:
         super(AttentionWEdgeBias, self).__init__(None)
-        self.proj_edge_bias = nn.Linear(
+        self.proj_edge_bias = tnn.Linear(
             in_features=d_edge, out_features=n_head  # , bias=False
         )
         self.attention = Attention(
@@ -575,14 +575,16 @@ class AttentionWEdgeBias(OFModule):
         """
         node_repr = utils.normalize(node_repr)
         edge_repr = utils.normalize(edge_repr)
+        node_repr = to_tinygrad(node_repr)
+        edge_repr = to_tinygrad(edge_repr)
         # check dim
         edge_bias = self.proj_edge_bias(edge_repr).permute(2, 0, 1)
 
-        edge_bias = edge_bias + utils.mask2bias(mask[..., None, None, :])
+        edge_bias = edge_bias + to_tinygrad(utils.mask2bias(mask[..., None, None, :]))
         attn_out = self.attention(
             node_repr, node_repr, bias=edge_bias, fwd_cfg=fwd_cfg
         )
-        return attn_out
+        return to_torch(attn_out)
 
 
 def _get_sharded_stacked(
