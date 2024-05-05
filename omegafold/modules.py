@@ -302,9 +302,7 @@ class MultiHeadedScaling(OFModule):
         x = x.unsqueeze(self.unsqueeze_dim) * self.weight + self.bias
         positive_index = x.ndim + self.unsqueeze_dim
         if self.call_on_out_ready is not None:
-            x = to_torch(x)
             x = self.call_on_out_ready(x)
-            x = to_tinygrad(x)
 
         x = x.split(self.split_dims, dim=positive_index)
 

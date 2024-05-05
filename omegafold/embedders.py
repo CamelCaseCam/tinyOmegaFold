@@ -166,8 +166,8 @@ class RoPE(Module):
         self.no_load("inv_freq")
 
     def forward(
-            self, tensor: torch.Tensor, seq_dim: typing.Union[int, tuple]
-    ) -> torch.Tensor:
+            self, tensor: tinygrad.Tensor, seq_dim: typing.Union[int, tuple]
+    ) -> tinygrad.Tensor:
         """
 
         Args:
@@ -177,12 +177,11 @@ class RoPE(Module):
         Returns:
 
         """
-        tensor = to_tinygrad(tensor)
         if isinstance(seq_dim, int):
             seq_dim = [seq_dim, ]
         sin, cos = self._compute_sin_cos(tensor, seq_dim)
 
-        return to_torch(_apply_embed(tensor, sin, cos, seq_dim))
+        return _apply_embed(tensor, sin, cos, seq_dim)
 
     def _compute_sin_cos(
             self, tensor: tinygrad.Tensor, seq_dim: typing.Tuple[int]
