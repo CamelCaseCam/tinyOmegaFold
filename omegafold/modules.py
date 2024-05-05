@@ -30,7 +30,6 @@ from tinygrad import nn as tnn
 import torch
 from torch import nn
 import tinygrad
-## TESTING
 import numpy as np
 
 from omegafold import utils
@@ -286,7 +285,7 @@ class MultiHeadedScaling(OFModule):
 
         self.reset_parameters()
 
-    def forward(self, x: torch.Tensor) -> typing.List[torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> typing.List[tinygrad.Tensor]:
         """
         Element wise multiplication followed by addition
 
@@ -306,7 +305,7 @@ class MultiHeadedScaling(OFModule):
 
         x = x.split(self.split_dims, dim=positive_index)
 
-        return [to_torch(x_i.squeeze(positive_index)) for x_i in x]
+        return [x_i.squeeze(positive_index) for x_i in x]
 
     def reset_parameters(self):
         self.weight = tinygrad.Tensor.normal(self.weight.shape, std=0.02, dtype=self.weight.dtype)
@@ -319,24 +318,25 @@ class Val2ContBins(OFModule):
 
         x_bin_size = (cfg.x_max - cfg.x_min) / (cfg.x_bins - 2)
 
-        self.register_buffer(
-            "x_offset", torch.linspace(
-                cfg.x_min - x_bin_size / 2,
-                cfg.x_max + x_bin_size / 2,
-                cfg.x_bins
-            ), persistent=False
-        )
-        self.coeff = -0.5 / ((x_bin_size * 0.2) ** 2)
+        self.x_offset = tinygrad.Tensor(np.linspace(
+            cfg.x_min - x_bin_size / 2,
+            cfg.x_max + x_bin_size / 2,
+            cfg.x_bins
+        ))
+        self.no_load("x_offset")
+        self.coeff : float = -0.5 / ((x_bin_size * 0.2) ** 2)
+        self.no_load("coeff")
         # `*0.5`: makes it not too blurred
 
     def forward(self, dist_x):  # (*)
+        dist_x = to_tinygrad(dist_x)
         x_offset_shape = [1] * len(dist_x.size()) + [len(self.x_offset)]
         x = dist_x.unsqueeze(-1) - self.x_offset.view(*x_offset_shape)
-        x_norm = self.coeff * torch.pow(x, 2)
+        x_norm = self.coeff * x.pow(2)
         x_norm = x_norm - x_norm.max(-1, keepdim=True)[0]
-        logits = torch.softmax(x_norm, dim=-1)
+        logits = x_norm.softmax(-1)
 
-        return logits
+        return to_torch(logits)
 
 
 class Val2Bins(OFModule):

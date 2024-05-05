@@ -100,6 +100,7 @@ class GatedAttentionUnit(modules.OFModule):
             [cfg.proj_dim, cfg.proj_dim, cfg.attn_dim], dim=-1
         )
         queries, keys = self.multi_headed_scaling(base)
+        # queries, keys are tinygrad tensors, which is fine because `attention` has been converted
 
         node, edge = modules.attention(
             query=queries,
