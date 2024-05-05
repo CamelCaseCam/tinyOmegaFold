@@ -126,6 +126,7 @@ def attention(
         return_edge: bool = False,
         edge_reduction: str = 'sum',
         edge_reduction_dim: int = 0,
+        tt = True
 ) -> typing.Tuple[torch.Tensor, typing.Tuple[torch.Tensor]]:
     """Computes attention with q, k , v
 
@@ -180,10 +181,8 @@ def attention(
         if return_edge:
             attns[..., start:end, :] = attn
 
-    # stop tinygrad reimplementation here
-    output = to_torch(output)
 
-    return output, to_torch(attns)
+    return (to_torch(output), to_torch(attns)) if tt else (output, attns)
 
 
 # =============================================================================
@@ -440,19 +439,16 @@ class Attention(OFModule):
         self.q_dim = q_dim
         self.n_axis = n_axis
 
-        self.qg_weights = nn.Parameter(
-            torch.empty(q_dim, n_axis, n_head, (gating + 1) * c)
-        )
-        self.kv_weights = nn.Parameter(
-            torch.empty(kv_dim, n_axis, n_head, 2 * c)
-        )
-        self.qg_bias = nn.Parameter(
-            torch.empty(n_axis, n_head, 1, c * (1 + gating))
-        )
-        self.kv_bias = nn.Parameter(torch.empty(n_axis, n_head, 1, c * 2))
+        self.qg_weights = tinygrad.Tensor.empty(q_dim, n_axis, n_head, (gating + 1) * c)
+        
+        self.kv_weights = tinygrad.Tensor.empty(kv_dim, n_axis, n_head, 2 * c)
+        
+        self.qg_bias = tinygrad.Tensor.empty(n_axis, n_head, 1, c * (1 + gating))
+        
+        self.kv_bias = tinygrad.Tensor.empty(n_axis, n_head, 1, c * 2)
 
-        self.o_weights = nn.Parameter(torch.empty(n_axis, n_head, c, out_dim))
-        self.o_bias = nn.Parameter(torch.empty([out_dim, n_axis]))
+        self.o_weights = tinygrad.Tensor.empty(n_axis, n_head, c, out_dim)
+        self.o_bias = tinygrad.Tensor.empty([out_dim, n_axis])
 
     def forward(
             self,
@@ -479,6 +475,9 @@ class Attention(OFModule):
             output tensor (*, seq_len, o_dim, (n_axis))
             attention logits (Optional) (q_len, kv_len, num_head)
         """
+        q_inputs = to_tinygrad(q_inputs)
+        kv_inputs = to_tinygrad(kv_inputs)
+        bias = to_tinygrad(bias)
 
         # Acquire the q, k, v tensors
         to_unsqueeze = (
@@ -493,21 +492,21 @@ class Attention(OFModule):
 
         attn_out = self._get_attn_out(q_inputs, kv_inputs, fwd_cfg, bias)
 
-        output = torch.einsum('...rhqc,rhco->...qor', attn_out, self.o_weights)
+        output = tinygrad.Tensor.einsum('brhqc,rhco->bqor', attn_out, self.o_weights)
         output += self.o_bias
 
         if to_unsqueeze:
             output = output.squeeze(-1)
-        return output
+        return to_torch(output)
 
     def _get_attn_out(self, q_inputs, kv_inputs, fwd_cfg, bias):
 
-        qg = torch.einsum('...qar,arhc->...rhqc', q_inputs, self.qg_weights)
+        qg = tinygrad.Tensor.einsum("bqar,arhc->brhqc", q_inputs, self.qg_weights)
         qg += self.qg_bias
         q_out = qg.split(self.c, dim=-1)
         q = q_out[0]
 
-        kv = torch.einsum('...kar,arhc->...rhkc', kv_inputs, self.kv_weights)
+        kv = tinygrad.Tensor.einsum("bkar,arhc->brhkc", kv_inputs, self.kv_weights)
         kv += self.kv_bias
         k, v = kv.split([self.c, self.c], dim=-1)
 
@@ -521,11 +520,12 @@ class Attention(OFModule):
             value=v,
             subbatch_size=subbatch_size,
             bias=bias,
-            scale=self.c ** (-0.5)
+            scale=self.c ** (-0.5),
+            tt=False
         )
         # get the gating
         if self.gating:
-            g = torch.sigmoid(q_out[1])
+            g = q_out[1].sigmoid()
             attn_out *= g
 
         return attn_out
