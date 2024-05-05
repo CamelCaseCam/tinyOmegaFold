@@ -349,9 +349,10 @@ class Val2Bins(OFModule):
 
     def __init__(self, cfg: argparse.Namespace) -> None:
         super(Val2Bins, self).__init__(cfg)
-        self.breaks = torch.linspace(   # BUG: (potentially) may cause issue when loading from state dict
+        self.breaks = tinygrad.Tensor(np.linspace(
                 cfg.first_break, cfg.last_break, cfg.num_bins - 1
-        )
+        ))
+        self.no_load("breaks")
 
     def forward(self, dist: torch.Tensor) -> torch.Tensor:
         """
@@ -362,11 +363,11 @@ class Val2Bins(OFModule):
         Returns:
 
         """
+        dist : tinygrad.Tensor = to_tinygrad(dist)
         dist = dist.unsqueeze(-1)
-        dist_bin = torch.sum(
-            torch.gt(dist, self.breaks), dim=-1, dtype=torch.long
-        )
-        return dist_bin
+        dist_bin : tinygrad.Tensor = (dist > self.breaks).cast(tinygrad.dtypes.int32)
+        dist_bin = dist_bin.sum(-1)
+        return to_torch(dist_bin)
 
 
 class Node2Edge(OFModule):
