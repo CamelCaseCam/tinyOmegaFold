@@ -378,30 +378,35 @@ class Node2Edge(OFModule):
 
     def __init__(self, in_dim: int, proj_dim: int, out_dim: int) -> None:
         super(Node2Edge, self).__init__(None)
-        self.input_proj = nn.Linear(in_dim, proj_dim * 2)
+        self.input_proj = tnn.Linear(in_dim, proj_dim * 2)
         self.proj_dim = proj_dim
-        self.out_weights = nn.Parameter(
-            torch.empty(proj_dim, proj_dim, out_dim)
-        )
-        self.out_bias = nn.Parameter(torch.empty(out_dim))
+        self.out_weights = tinygrad.Tensor.empty(proj_dim, proj_dim, out_dim)
+        self.out_bias = tinygrad.Tensor.empty(out_dim)
 
     def forward(
             self, node_repr: torch.Tensor, mask: torch.Tensor
     ) -> torch.Tensor:
-        node_repr = utils.normalize(node_repr)
+        mask = to_tinygrad(mask)
+        
+        node_repr = utils.normalize(node_repr) # TODO: Convert normalize to tinygrad
+        node_repr = to_tinygrad(node_repr)
+
         act = self.input_proj(node_repr)
         mask = mask[..., None]
         act = act * mask
-        norm = torch.einsum("...sid, ...sjd->...ijd", mask, mask)
+
+        # This einsum may be a pain to convert to tinygrad
+        norm = tinygrad.Tensor.einsum("sid, sjd->ijd", mask, mask)
+
 
         l, r = act.split(self.proj_dim, dim=-1)
         # We found this implementation to work significantly faster
-        out = torch.einsum(
-            '...sid, def, ...sje-> ...ijf', l, self.out_weights, r
+        out = tinygrad.Tensor.einsum(
+            'sid, def, sje-> ijf', l, self.out_weights, r
         ) + self.out_bias
         out = out / (norm + 1e-3)
 
-        return out
+        return to_torch(out)
 
 
 class Attention(OFModule):
