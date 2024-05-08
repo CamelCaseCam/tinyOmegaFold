@@ -33,7 +33,7 @@ import tinygrad
 import numpy as np
 
 from omegafold import utils
-from omegafold.utils.conversion import Module, Sequential, to_tinygrad, to_torch, dt2tg, dv2trch, dv2tg
+from omegafold.utils.conversion import Module, Sequential, to_tinygrad, to_torch, dt2tg, dv2trch, dv2tg, dt2trch
 
 
 # =============================================================================
@@ -456,7 +456,8 @@ class Attention(OFModule):
             kv_inputs: torch.Tensor,
             bias: torch.Tensor,
             *,
-            fwd_cfg: typing.Optional[argparse.Namespace] = None
+            fwd_cfg: typing.Optional[argparse.Namespace] = None,
+            tt = True
     ) -> typing.Union[typing.Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
         """
         Perform the standard multi-headed attention with added gating with some
@@ -497,7 +498,7 @@ class Attention(OFModule):
 
         if to_unsqueeze:
             output = output.squeeze(-1)
-        return to_torch(output)
+        return to_torch(output) if tt else output
 
     def _get_attn_out(self, q_inputs, kv_inputs, fwd_cfg, bias):
 
@@ -588,14 +589,14 @@ class AttentionWEdgeBias(OFModule):
 
 
 def _get_sharded_stacked(
-        edge_repr: torch.Tensor,
+        edge_repr: tinygrad.Tensor,
         subbatch_size: int
 ):
     subbatch_size = subbatch_size or edge_repr.shape[-2]
     idx = 0
     start, end = 0, subbatch_size
     while start < edge_repr.shape[-2]:
-        yield start, end, torch.stack(
+        yield start, end, tinygrad.Tensor.stack(
             [
                 edge_repr[start:end],
                 edge_repr.transpose(-2, -3)[start:end]
@@ -604,6 +605,10 @@ def _get_sharded_stacked(
         idx += 1
         start, end = idx * subbatch_size, (idx + 1) * subbatch_size
 
+def tg_glu(inp : tinygrad.Tensor) -> tinygrad.Tensor:
+    # Implements a * b.sigmoid() where a and b are the two halves of the input
+    a, b = inp.split(inp.shape[-1] // 2, dim=-1)
+    return a * b.sigmoid()
 
 class GeometricAttention(OFModule):
     """We have a lot of stuff here for GRAM reduction
@@ -615,23 +620,19 @@ class GeometricAttention(OFModule):
         self.d_edge = d_edge
         self.n_axis = n_axis
         self.n_head = n_head
-        self.linear_b_weights = nn.Parameter(
-            torch.empty([d_edge, n_axis, n_head])
-        )
-        self.linear_b_bias = nn.Parameter(
-            torch.empty([n_axis, n_head, 1, 1])
-        )
+        self.linear_b_weights = tinygrad.Tensor.empty([d_edge, n_axis, n_head])
+        
+        self.linear_b_bias = tinygrad.Tensor.empty([n_axis, n_head, 1, 1])
+        
 
-        self.act_w = nn.Parameter(
-            torch.empty([d_edge, n_axis, d_edge * 5])
-        )
-        self.act_b = nn.Parameter(torch.empty([n_axis, d_edge * 5]))
+        self.act_w = tinygrad.Tensor.empty([d_edge, n_axis, d_edge * 5])
+        
+        self.act_b = tinygrad.Tensor.empty([n_axis, d_edge * 5])
 
-        self.out_proj_w = nn.Parameter(
-            torch.empty([n_axis, d_edge, d_edge])
-        )
-        self.out_proj_b = nn.Parameter(torch.empty([n_axis, d_edge]))
-        self.glu = nn.GLU()
+        self.out_proj_w = tinygrad.Tensor.empty([n_axis, d_edge, d_edge])
+        
+        self.out_proj_b = tinygrad.Tensor.empty([n_axis, d_edge])
+        #self.glu = nn.GLU()
 
         self.attention = Attention(
             q_dim=d_edge,
@@ -645,37 +646,39 @@ class GeometricAttention(OFModule):
 
     def _get_attended(
             self,
-            edge_repr: torch.Tensor,
-            mask: torch.Tensor,
+            edge_repr: tinygrad.Tensor,
+            mask: tinygrad.Tensor,
             fwd_cfg
     ) -> torch.Tensor:
-        attended = torch.empty(
+        attended = tinygrad.Tensor.empty(
             *edge_repr.shape, self.n_axis,
             dtype=edge_repr.dtype,
             device=edge_repr.device
         )
         b = torch.zeros(
             self.n_axis, self.n_head, *edge_repr.shape[:2],
-            dtype=edge_repr.dtype,
-            device=edge_repr.device
+            dtype=dt2trch[edge_repr.dtype],
+            device=dv2trch[edge_repr.device]
         )
-        b += utils.mask2bias(mask)
+        b += utils.mask2bias(to_torch(mask))
+        b = to_tinygrad(b)
         for s, e, edge_r in _get_sharded_stacked(
                 edge_repr, subbatch_size=fwd_cfg.subbatch_size
         ):
-            b[..., s:e, :] = torch.einsum(
-                '...qkcr,crh->...rhqk', edge_r, self.linear_b_weights
+            b[..., s:e, :] = tinygrad.Tensor.einsum(
+                'qkcr,crh->rhqk', edge_r, self.linear_b_weights
             ) + self.linear_b_bias
         for s, e, edge_r in _get_sharded_stacked(
                 edge_repr, subbatch_size=fwd_cfg.subbatch_size
         ):
             attended[s:e] = self.attention(
-                edge_r, edge_r, b, fwd_cfg=fwd_cfg
+                edge_r, edge_r, b, fwd_cfg=fwd_cfg, tt=False
             )
+        attended = attended
         return attended[..., 0] + attended[..., 1].transpose(-2, -3)
 
-    def _get_gated(self, edge_repr: torch.Tensor, mask: torch.Tensor, fwd_cfg):
-        gated = torch.empty(
+    def _get_gated(self, edge_repr: tinygrad.Tensor, mask: tinygrad.Tensor, fwd_cfg):
+        gated = tinygrad.Tensor.empty(
             *edge_repr.shape[:2],
             self.n_axis,
             self.d_edge,
@@ -686,28 +689,29 @@ class GeometricAttention(OFModule):
                 edge_repr, subbatch_size=fwd_cfg.subbatch_size
         ):
             act_row = self._get_act_row(edge_row, mask[s_row:e_row])
-            act_g = torch.sigmoid(
-                torch.einsum(
-                    '...dr,drc->...rc',
+            act_g = (
+                tinygrad.Tensor.einsum(
+                    'abdr,drc->abrc',
                     edge_row,
                     self.act_w[..., -self.d_edge:]
-                ) + self.act_b[..., -self.d_edge:]
-            )
+                ) + self.act_b[..., -self.d_edge:]).sigmoid()
+            
             for s_col, e_col, edge_col, in _get_sharded_stacked(
                     edge_repr, subbatch_size=fwd_cfg.subbatch_size
             ):
                 act_col = self._get_act_col(edge_col, mask[s_col:e_col])
-                ab = torch.einsum('...ikrd,...jkrd->...ijrd', act_row, act_col)
-                ab = utils.normalize(ab.contiguous())
-                gated[s_row:e_row, s_col:e_col] = torch.einsum(
-                    '...rd,rdc->...rc', ab, self.out_proj_w
+                ab = tinygrad.Tensor.einsum('ikrd,jkrd->ijrd', act_row, act_col)
+                ab = utils.normalize(to_torch(ab.contiguous()))
+                ab = to_tinygrad(ab)
+                gated[s_row:e_row, s_col:e_col] = tinygrad.Tensor.einsum(
+                    'abrd,rdc->abrc', ab, self.out_proj_w
                 )
-                gated[s_row:e_row, s_col:e_col].add_(self.out_proj_b)
+                gated[s_row:e_row, s_col:e_col].add(self.out_proj_b)
                 gated[s_row:e_row, s_col:e_col] *= act_g[:, s_col:e_col]
 
         return gated.sum(-2)
 
-    def _get_sliced_weight(self, weight: torch.Tensor, shift=0):
+    def _get_sliced_weight(self, weight: tinygrad.Tensor, shift=0) -> tinygrad.Tensor:
         w = weight[..., :-self.d_edge].unflatten(-1, sizes=(4, -1))
         w = w[..., shift::2, :]
         w = w.flatten(start_dim=-2)
@@ -715,34 +719,36 @@ class GeometricAttention(OFModule):
 
     def _get_act_row(
             self,
-            edge_row: torch.Tensor,
-            mask: torch.Tensor
-    ) -> torch.Tensor:
+            edge_row: tinygrad.Tensor,
+            mask: tinygrad.Tensor
+    ) -> tinygrad.Tensor:
         w = self._get_sliced_weight(self.act_w)
         b = self._get_sliced_weight(self.act_b)
-        act = torch.einsum('...dr,drc->...rc', edge_row, w) + b
-        act = self.glu(act) * mask[..., None, None, None]
+        act = tinygrad.Tensor.einsum('abdr,drc->abrc', edge_row, w) + b
+        act = tg_glu(act) * mask[..., None, None, None]
         return act
 
     def _get_act_col(
             self,
-            edge_row: torch.Tensor,
-            mask: torch.Tensor
-    ) -> torch.Tensor:
+            edge_row: tinygrad.Tensor,
+            mask: tinygrad.Tensor
+    ) -> tinygrad.Tensor:
         w = self._get_sliced_weight(self.act_w, shift=1)
         b = self._get_sliced_weight(self.act_b, shift=1)
-        act = torch.einsum('...dr,drc->...rc', edge_row, w) + b
-        act = self.glu(act) * mask[..., None, None, None]
+        act = tinygrad.Tensor.einsum('abdr,drc->abrc', edge_row, w) + b
+        act = tg_glu(act) * mask[..., None, None, None]
         return act
 
     def forward(
             self, edge_repr: torch.Tensor, mask: torch.Tensor, fwd_cfg
     ) -> torch.Tensor:
         edge_repr = utils.normalize(edge_repr)
+        edge_repr = to_tinygrad(edge_repr)
+        mask = to_tinygrad(mask)
         out = self._get_attended(edge_repr, mask, fwd_cfg)
         out += self._get_gated(edge_repr, mask, fwd_cfg)
 
-        return out
+        return to_torch(out)
 
 
 # =============================================================================

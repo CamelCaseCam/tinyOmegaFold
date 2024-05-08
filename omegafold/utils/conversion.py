@@ -16,6 +16,7 @@ if os.environ.get('USER') == 'cameronk':
 dt2tg = { torch.float32: tinygrad.dtypes.float32, torch.float64: tinygrad.dtypes.float64, torch.int32: tinygrad.dtypes.int32, None: None }
 dv2tg = { torch.device('cpu'): "clang", torch.device('cuda', index=0): "gpu" }
 dv2trch = { "clang": torch.device('cpu'), "gpu": torch.device('cuda', index=0), "CLANG" : torch.device('cpu'), "GPU": torch.device('cuda', index=0) }
+dt2trch = { tinygrad.dtypes.float32: torch.float32, tinygrad.dtypes.float64: torch.float64, tinygrad.dtypes.int32: torch.int32, None: None }
 
 def to_tinygrad(x: torch.Tensor, checknan=False) -> tinygrad.Tensor:
     if x is None:
