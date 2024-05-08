@@ -238,7 +238,6 @@ def save_pdb(
     os.makedirs(pathlib.Path(save_path).parent, exist_ok=True)
     io.save(save_path)
 
-
 def _load_weights(
         weights_url: str, weights_file: str,
 ) -> collections.OrderedDict:

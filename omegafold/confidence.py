@@ -27,6 +27,7 @@ import torch
 from torch import nn
 
 from omegafold import modules, utils
+from omegafold.utils.conversion import Sequential
 
 
 # =============================================================================
@@ -130,7 +131,7 @@ class ConfidenceHead(modules.OFModule):
 
     def __init__(self, cfg: argparse.Namespace):
         super().__init__(cfg)
-        self.network = nn.Sequential(
+        self.network = Sequential(
             nn.Linear(cfg.node_dim, cfg.hidden_dim),
             nn.ReLU(inplace=True),
             nn.Linear(cfg.hidden_dim, cfg.hidden_dim),

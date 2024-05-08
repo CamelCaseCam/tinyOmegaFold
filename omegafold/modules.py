@@ -24,10 +24,16 @@ import argparse
 import numbers
 import typing
 
+import tinygrad.device
+import tinygrad.tensor
+from tinygrad import nn as tnn
 import torch
 from torch import nn
+import tinygrad
+import numpy as np
 
 from omegafold import utils
+from omegafold.utils.conversion import Module, Sequential, to_tinygrad, to_torch, dt2tg, dv2trch, dv2tg, dt2trch
 
 
 # =============================================================================
@@ -55,27 +61,28 @@ def softmax(
     Returns:
 
     """
-    if in_place:
-        max_val = torch.max(x, dim=dim, keepdim=True)[0]
-        torch.sub(x, max_val, out=x)
-        torch.exp(x, out=x)
-        summed = torch.sum(x, dim=dim, keepdim=True)
-        x /= summed
-        return x
-    else:
-        return torch.softmax(input=x, dim=dim, dtype=dtype)
+    x = to_tinygrad(x, checknan=False)
 
+    ### In place removed because tinygrad's kernel fusion makes it redundant
+    return to_torch(x.softmax(axis=dim), device=dv2trch[x.device])
+
+# Define einsum formulae for different shapes
+einsum_formulae = {
+    (2, 2, 2): ("id, jd -> ij", "ij, jd -> id"),
+    (3, 3, 3): ("bid, bjd -> bij", "bij, bjd -> bid"),
+    (5, 5, 5): ("abcid, abcjd -> abcij", "abcij, abcjd -> abcid")
+}
 
 def _attention(
-        query: torch.Tensor,
-        key: torch.Tensor,
-        scale: torch.Tensor,
-        value: torch.Tensor,
-        bias: torch.Tensor,
+        query: tinygrad.Tensor,
+        key: tinygrad.Tensor,
+        scale: tinygrad.Tensor,
+        value: tinygrad.Tensor,
+        bias: tinygrad.Tensor,
         return_edge: bool,
         edge_reduction: str,
         edge_reduction_dim: int
-) -> typing.Tuple[torch.Tensor, typing.Optional[torch.Tensor]]:
+) -> typing.Tuple[tinygrad.Tensor, typing.Optional[tinygrad.Tensor]]:
     """Normal attention
 
     Args:
@@ -90,12 +97,19 @@ def _attention(
         The aggregated tensor of shape (*_q, dim_v)
 
     """
-    logits = torch.einsum("...id, ...jd -> ...ij", query * scale, key)
-    logits.add_(bias)
+    q_shape = query.shape
+    k_shape = key.shape
+    v_shape = value.shape
+
+    logits_formula, out_formula = einsum_formulae[(len(q_shape), len(k_shape), len(v_shape))]
+    
+    logits = tinygrad.Tensor.einsum(logits_formula, query * scale, key)
+    logits = logits + bias
     attn = softmax(logits, dim=-1, in_place=not return_edge)
-    out = torch.einsum("...ij, ...jd -> ...id", attn, value)
+    attn = to_tinygrad(attn)
+    out = tinygrad.Tensor.einsum(out_formula, attn, value)
     if return_edge:
-        attn = getattr(attn, edge_reduction)(dim=edge_reduction_dim)
+        attn = getattr(attn, edge_reduction)(axis=edge_reduction_dim)
         return out, attn
     else:
         return out, None
@@ -112,6 +126,7 @@ def attention(
         return_edge: bool = False,
         edge_reduction: str = 'sum',
         edge_reduction_dim: int = 0,
+        tt = True
 ) -> typing.Tuple[torch.Tensor, typing.Tuple[torch.Tensor]]:
     """Computes attention with q, k , v
 
@@ -130,18 +145,22 @@ def attention(
         The aggregated tensor of shape (*_q, dim_v)
 
     """
+    query = to_tinygrad(query)
+    scale = to_tinygrad(scale)
+    key = to_tinygrad(key)
+    value = to_tinygrad(value)
+    bias = to_tinygrad(bias)
     q_length, k_length, v_dim = query.shape[-2], key.shape[-2], value.shape[-1]
     subbatch_size = subbatch_size or q_length
 
     batch_shape = list(query.shape[:-2])
-    factory_kwargs = nn.factory_kwargs(
-        {"device": query.device, "dtype": query.dtype}
-    )
-    output = torch.empty(*batch_shape, q_length, v_dim, **factory_kwargs)
+
+    output = tinygrad.Tensor.empty(*batch_shape, q_length, v_dim, device=query.device, dtype=query.dtype)
+
     if return_edge:
         batch_shape.pop(edge_reduction_dim + 2)
-        attns = torch.empty(
-            *batch_shape, q_length, k_length, **factory_kwargs
+        attns = tinygrad.Tensor.empty(
+            *batch_shape, q_length, k_length, device=query.device, dtype=query.dtype
         )
     else:
         attns = None
@@ -157,18 +176,20 @@ def attention(
             q_i, key, scale, value, b_i, return_edge,
             edge_reduction, edge_reduction_dim
         )
+
         output[..., start:end, :] = res
         if return_edge:
             attns[..., start:end, :] = attn
 
-    return output, attns
+
+    return (to_torch(output), to_torch(attns)) if tt else (output, attns)
 
 
 # =============================================================================
 # Classes
 # =============================================================================
 
-class OFModule(nn.Module):
+class OFModule(Module):
     """
     The OmegaFold modules
         args: The arguments used for each of the modules
@@ -178,42 +199,51 @@ class OFModule(nn.Module):
             self,
             cfg: typing.Optional[argparse.Namespace]
     ) -> None:
-        super(OFModule, self).__init__()
+        #super(OFModule, self).__init__()
         self.cfg = cfg
 
     @property
     def device(self) -> torch.device:
-        return next(self.parameters()).device
+        return self.getdevice()
 
     @property
     def dtype(self) -> torch.dtype:
-        return next(self.parameters()).dtype
+        return self.getdtype()
 
 
+activations = {
+    "relu": tinygrad.Tensor.relu,
+    "leaky_relu": tinygrad.Tensor.leakyrelu,
+    "sigmoid": tinygrad.Tensor.sigmoid,
+    "tanh": tinygrad.Tensor.tanh,
+}
 class Transition(OFModule):
     def __init__(self, d: int, n: int, activation: str) -> None:
         super(Transition, self).__init__(None)
-        fc1 = nn.Linear(d, n * d)
-        fc2 = nn.Linear(n * d, d)
+        fc1 = tnn.Linear(d, n * d)
+        fc2 = tnn.Linear(n * d, d)
         try:
-            act = getattr(nn, activation)(inplace=True)
-        except TypeError:
-            act = getattr(nn, activation)()
-        self.network = nn.Sequential(fc1, act, fc2)
+            act = activations[activation.lower()]
+        except:
+            raise ValueError(f"Activation {activation} not supported")
+        self.network = Sequential(fc1, act, fc2)
 
     def forward(
             self,
             x: torch.Tensor,
             subbatch_size: typing.Optional[int]
     ) -> torch.Tensor:
+        x = to_tinygrad(x)
         subbatch_size = subbatch_size or x.shape[-2]
 
-        out = torch.empty_like(x)
+        out = tinygrad.Tensor.empty(x.shape, device=x.device, dtype=x.dtype)
         for i, x_i in enumerate(x.split(subbatch_size, dim=0)):
             start, end = i * subbatch_size, (i + 1) * subbatch_size
+            x_i = to_torch(x_i)
             x_i = utils.normalize(x_i)
+            x_i = to_tinygrad(x_i)
             out[start:end] = self.network(x_i)
-        return out
+        return to_torch(out)
 
 
 class MultiHeadedScaling(OFModule):
@@ -248,13 +278,13 @@ class MultiHeadedScaling(OFModule):
         shape.insert(0, num_heads)
         self.shape = shape
         self.split_dims = [1] * num_heads
-        self.weight = nn.Parameter(torch.empty(self.shape, **factory_kwargs))
-        self.bias = nn.Parameter(torch.empty(self.shape, **factory_kwargs))
+        self.weight = tinygrad.Tensor.empty(self.shape, dtype=dt2tg[dtype])
+        self.bias = tinygrad.Tensor.empty(self.shape, dtype=dt2tg[dtype])
         self.call_on_out_ready = on_out_ready
 
         self.reset_parameters()
 
-    def forward(self, x: torch.Tensor) -> typing.List[torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> typing.List[tinygrad.Tensor]:
         """
         Element wise multiplication followed by addition
 
@@ -266,6 +296,7 @@ class MultiHeadedScaling(OFModule):
             A output tensor of the same shape
 
         """
+        x = to_tinygrad(x)
         x = x.unsqueeze(self.unsqueeze_dim) * self.weight + self.bias
         positive_index = x.ndim + self.unsqueeze_dim
         if self.call_on_out_ready is not None:
@@ -276,8 +307,8 @@ class MultiHeadedScaling(OFModule):
         return [x_i.squeeze(positive_index) for x_i in x]
 
     def reset_parameters(self):
-        nn.init.normal_(self.weight, std=0.02)
-        nn.init.zeros_(self.bias)
+        self.weight = tinygrad.Tensor.normal(self.weight.shape, std=0.02, dtype=self.weight.dtype)
+        self.bias = tinygrad.Tensor.zeros(self.bias.shape, dtype=self.bias.dtype)
 
 
 class Val2ContBins(OFModule):
@@ -286,24 +317,25 @@ class Val2ContBins(OFModule):
 
         x_bin_size = (cfg.x_max - cfg.x_min) / (cfg.x_bins - 2)
 
-        self.register_buffer(
-            "x_offset", torch.linspace(
-                cfg.x_min - x_bin_size / 2,
-                cfg.x_max + x_bin_size / 2,
-                cfg.x_bins
-            ), persistent=False
-        )
-        self.coeff = -0.5 / ((x_bin_size * 0.2) ** 2)
+        self.x_offset = tinygrad.Tensor(np.linspace(
+            cfg.x_min - x_bin_size / 2,
+            cfg.x_max + x_bin_size / 2,
+            cfg.x_bins
+        ))
+        self.no_load("x_offset")
+        self.coeff : float = -0.5 / ((x_bin_size * 0.2) ** 2)
+        self.no_load("coeff")
         # `*0.5`: makes it not too blurred
 
     def forward(self, dist_x):  # (*)
+        dist_x = to_tinygrad(dist_x)
         x_offset_shape = [1] * len(dist_x.size()) + [len(self.x_offset)]
         x = dist_x.unsqueeze(-1) - self.x_offset.view(*x_offset_shape)
-        x_norm = self.coeff * torch.pow(x, 2)
+        x_norm = self.coeff * x.pow(2)
         x_norm = x_norm - x_norm.max(-1, keepdim=True)[0]
-        logits = torch.softmax(x_norm, dim=-1)
+        logits = x_norm.softmax(-1)
 
-        return logits
+        return to_torch(logits)
 
 
 class Val2Bins(OFModule):
@@ -316,11 +348,10 @@ class Val2Bins(OFModule):
 
     def __init__(self, cfg: argparse.Namespace) -> None:
         super(Val2Bins, self).__init__(cfg)
-        self.register_buffer(
-            "breaks", torch.linspace(
+        self.breaks = tinygrad.Tensor(np.linspace(
                 cfg.first_break, cfg.last_break, cfg.num_bins - 1
-            ), persistent=False
-        )
+        ))
+        self.no_load("breaks")
 
     def forward(self, dist: torch.Tensor) -> torch.Tensor:
         """
@@ -331,11 +362,11 @@ class Val2Bins(OFModule):
         Returns:
 
         """
+        dist : tinygrad.Tensor = to_tinygrad(dist)
         dist = dist.unsqueeze(-1)
-        dist_bin = torch.sum(
-            torch.gt(dist, self.breaks), dim=-1, dtype=torch.long
-        )
-        return dist_bin
+        dist_bin : tinygrad.Tensor = (dist > self.breaks).cast(tinygrad.dtypes.int32)
+        dist_bin = dist_bin.sum(-1)
+        return to_torch(dist_bin)
 
 
 class Node2Edge(OFModule):
@@ -346,30 +377,35 @@ class Node2Edge(OFModule):
 
     def __init__(self, in_dim: int, proj_dim: int, out_dim: int) -> None:
         super(Node2Edge, self).__init__(None)
-        self.input_proj = nn.Linear(in_dim, proj_dim * 2)
+        self.input_proj = tnn.Linear(in_dim, proj_dim * 2)
         self.proj_dim = proj_dim
-        self.out_weights = nn.Parameter(
-            torch.empty(proj_dim, proj_dim, out_dim)
-        )
-        self.out_bias = nn.Parameter(torch.empty(out_dim))
+        self.out_weights = tinygrad.Tensor.empty(proj_dim, proj_dim, out_dim)
+        self.out_bias = tinygrad.Tensor.empty(out_dim)
 
     def forward(
             self, node_repr: torch.Tensor, mask: torch.Tensor
     ) -> torch.Tensor:
-        node_repr = utils.normalize(node_repr)
+        mask = to_tinygrad(mask)
+        
+        node_repr = utils.normalize(node_repr) # TODO: Convert normalize to tinygrad
+        node_repr = to_tinygrad(node_repr)
+
         act = self.input_proj(node_repr)
         mask = mask[..., None]
         act = act * mask
-        norm = torch.einsum("...sid, ...sjd->...ijd", mask, mask)
+
+        # This einsum may be a pain to convert to tinygrad
+        norm = tinygrad.Tensor.einsum("sid, sjd->ijd", mask, mask)
+
 
         l, r = act.split(self.proj_dim, dim=-1)
         # We found this implementation to work significantly faster
-        out = torch.einsum(
-            '...sid, def, ...sje-> ...ijf', l, self.out_weights, r
+        out = tinygrad.Tensor.einsum(
+            'sid, def, sje-> ijf', l, self.out_weights, r
         ) + self.out_bias
         out = out / (norm + 1e-3)
 
-        return out
+        return to_torch(out)
 
 
 class Attention(OFModule):
@@ -403,19 +439,16 @@ class Attention(OFModule):
         self.q_dim = q_dim
         self.n_axis = n_axis
 
-        self.qg_weights = nn.Parameter(
-            torch.empty(q_dim, n_axis, n_head, (gating + 1) * c)
-        )
-        self.kv_weights = nn.Parameter(
-            torch.empty(kv_dim, n_axis, n_head, 2 * c)
-        )
-        self.qg_bias = nn.Parameter(
-            torch.empty(n_axis, n_head, 1, c * (1 + gating))
-        )
-        self.kv_bias = nn.Parameter(torch.empty(n_axis, n_head, 1, c * 2))
+        self.qg_weights = tinygrad.Tensor.empty(q_dim, n_axis, n_head, (gating + 1) * c)
+        
+        self.kv_weights = tinygrad.Tensor.empty(kv_dim, n_axis, n_head, 2 * c)
+        
+        self.qg_bias = tinygrad.Tensor.empty(n_axis, n_head, 1, c * (1 + gating))
+        
+        self.kv_bias = tinygrad.Tensor.empty(n_axis, n_head, 1, c * 2)
 
-        self.o_weights = nn.Parameter(torch.empty(n_axis, n_head, c, out_dim))
-        self.o_bias = nn.Parameter(torch.empty([out_dim, n_axis]))
+        self.o_weights = tinygrad.Tensor.empty(n_axis, n_head, c, out_dim)
+        self.o_bias = tinygrad.Tensor.empty([out_dim, n_axis])
 
     def forward(
             self,
@@ -423,7 +456,8 @@ class Attention(OFModule):
             kv_inputs: torch.Tensor,
             bias: torch.Tensor,
             *,
-            fwd_cfg: typing.Optional[argparse.Namespace] = None
+            fwd_cfg: typing.Optional[argparse.Namespace] = None,
+            tt = True
     ) -> typing.Union[typing.Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
         """
         Perform the standard multi-headed attention with added gating with some
@@ -442,6 +476,9 @@ class Attention(OFModule):
             output tensor (*, seq_len, o_dim, (n_axis))
             attention logits (Optional) (q_len, kv_len, num_head)
         """
+        q_inputs = to_tinygrad(q_inputs)
+        kv_inputs = to_tinygrad(kv_inputs)
+        bias = to_tinygrad(bias)
 
         # Acquire the q, k, v tensors
         to_unsqueeze = (
@@ -456,21 +493,21 @@ class Attention(OFModule):
 
         attn_out = self._get_attn_out(q_inputs, kv_inputs, fwd_cfg, bias)
 
-        output = torch.einsum('...rhqc,rhco->...qor', attn_out, self.o_weights)
+        output = tinygrad.Tensor.einsum('brhqc,rhco->bqor', attn_out, self.o_weights)
         output += self.o_bias
 
         if to_unsqueeze:
             output = output.squeeze(-1)
-        return output
+        return to_torch(output) if tt else output
 
     def _get_attn_out(self, q_inputs, kv_inputs, fwd_cfg, bias):
 
-        qg = torch.einsum('...qar,arhc->...rhqc', q_inputs, self.qg_weights)
+        qg = tinygrad.Tensor.einsum("bqar,arhc->brhqc", q_inputs, self.qg_weights)
         qg += self.qg_bias
         q_out = qg.split(self.c, dim=-1)
         q = q_out[0]
 
-        kv = torch.einsum('...kar,arhc->...rhkc', kv_inputs, self.kv_weights)
+        kv = tinygrad.Tensor.einsum("bkar,arhc->brhkc", kv_inputs, self.kv_weights)
         kv += self.kv_bias
         k, v = kv.split([self.c, self.c], dim=-1)
 
@@ -484,11 +521,12 @@ class Attention(OFModule):
             value=v,
             subbatch_size=subbatch_size,
             bias=bias,
-            scale=self.c ** (-0.5)
+            scale=self.c ** (-0.5),
+            tt=False
         )
         # get the gating
         if self.gating:
-            g = torch.sigmoid(q_out[1])
+            g = q_out[1].sigmoid()
             attn_out *= g
 
         return attn_out
@@ -504,7 +542,7 @@ class AttentionWEdgeBias(OFModule):
             attn_c: int
     ) -> None:
         super(AttentionWEdgeBias, self).__init__(None)
-        self.proj_edge_bias = nn.Linear(
+        self.proj_edge_bias = tnn.Linear(
             in_features=d_edge, out_features=n_head  # , bias=False
         )
         self.attention = Attention(
@@ -538,25 +576,27 @@ class AttentionWEdgeBias(OFModule):
         """
         node_repr = utils.normalize(node_repr)
         edge_repr = utils.normalize(edge_repr)
+        node_repr = to_tinygrad(node_repr)
+        edge_repr = to_tinygrad(edge_repr)
         # check dim
         edge_bias = self.proj_edge_bias(edge_repr).permute(2, 0, 1)
 
-        edge_bias = edge_bias + utils.mask2bias(mask[..., None, None, :])
+        edge_bias = edge_bias + to_tinygrad(utils.mask2bias(mask[..., None, None, :]))
         attn_out = self.attention(
             node_repr, node_repr, bias=edge_bias, fwd_cfg=fwd_cfg
         )
-        return attn_out
+        return to_torch(attn_out)
 
 
 def _get_sharded_stacked(
-        edge_repr: torch.Tensor,
+        edge_repr: tinygrad.Tensor,
         subbatch_size: int
 ):
     subbatch_size = subbatch_size or edge_repr.shape[-2]
     idx = 0
     start, end = 0, subbatch_size
     while start < edge_repr.shape[-2]:
-        yield start, end, torch.stack(
+        yield start, end, tinygrad.Tensor.stack(
             [
                 edge_repr[start:end],
                 edge_repr.transpose(-2, -3)[start:end]
@@ -565,6 +605,10 @@ def _get_sharded_stacked(
         idx += 1
         start, end = idx * subbatch_size, (idx + 1) * subbatch_size
 
+def tg_glu(inp : tinygrad.Tensor) -> tinygrad.Tensor:
+    # Implements a * b.sigmoid() where a and b are the two halves of the input
+    a, b = inp.split(inp.shape[-1] // 2, dim=-1)
+    return a * b.sigmoid()
 
 class GeometricAttention(OFModule):
     """We have a lot of stuff here for GRAM reduction
@@ -576,23 +620,19 @@ class GeometricAttention(OFModule):
         self.d_edge = d_edge
         self.n_axis = n_axis
         self.n_head = n_head
-        self.linear_b_weights = nn.Parameter(
-            torch.empty([d_edge, n_axis, n_head])
-        )
-        self.linear_b_bias = nn.Parameter(
-            torch.empty([n_axis, n_head, 1, 1])
-        )
+        self.linear_b_weights = tinygrad.Tensor.empty([d_edge, n_axis, n_head])
+        
+        self.linear_b_bias = tinygrad.Tensor.empty([n_axis, n_head, 1, 1])
+        
 
-        self.act_w = nn.Parameter(
-            torch.empty([d_edge, n_axis, d_edge * 5])
-        )
-        self.act_b = nn.Parameter(torch.empty([n_axis, d_edge * 5]))
+        self.act_w = tinygrad.Tensor.empty([d_edge, n_axis, d_edge * 5])
+        
+        self.act_b = tinygrad.Tensor.empty([n_axis, d_edge * 5])
 
-        self.out_proj_w = nn.Parameter(
-            torch.empty([n_axis, d_edge, d_edge])
-        )
-        self.out_proj_b = nn.Parameter(torch.empty([n_axis, d_edge]))
-        self.glu = nn.GLU()
+        self.out_proj_w = tinygrad.Tensor.empty([n_axis, d_edge, d_edge])
+        
+        self.out_proj_b = tinygrad.Tensor.empty([n_axis, d_edge])
+        #self.glu = nn.GLU()
 
         self.attention = Attention(
             q_dim=d_edge,
@@ -606,37 +646,39 @@ class GeometricAttention(OFModule):
 
     def _get_attended(
             self,
-            edge_repr: torch.Tensor,
-            mask: torch.Tensor,
+            edge_repr: tinygrad.Tensor,
+            mask: tinygrad.Tensor,
             fwd_cfg
     ) -> torch.Tensor:
-        attended = torch.empty(
+        attended = tinygrad.Tensor.empty(
             *edge_repr.shape, self.n_axis,
             dtype=edge_repr.dtype,
             device=edge_repr.device
         )
         b = torch.zeros(
             self.n_axis, self.n_head, *edge_repr.shape[:2],
-            dtype=edge_repr.dtype,
-            device=edge_repr.device
+            dtype=dt2trch[edge_repr.dtype],
+            device=dv2trch[edge_repr.device]
         )
-        b += utils.mask2bias(mask)
+        b += utils.mask2bias(to_torch(mask))
+        b = to_tinygrad(b)
         for s, e, edge_r in _get_sharded_stacked(
                 edge_repr, subbatch_size=fwd_cfg.subbatch_size
         ):
-            b[..., s:e, :] = torch.einsum(
-                '...qkcr,crh->...rhqk', edge_r, self.linear_b_weights
+            b[..., s:e, :] = tinygrad.Tensor.einsum(
+                'qkcr,crh->rhqk', edge_r, self.linear_b_weights
             ) + self.linear_b_bias
         for s, e, edge_r in _get_sharded_stacked(
                 edge_repr, subbatch_size=fwd_cfg.subbatch_size
         ):
             attended[s:e] = self.attention(
-                edge_r, edge_r, b, fwd_cfg=fwd_cfg
+                edge_r, edge_r, b, fwd_cfg=fwd_cfg, tt=False
             )
+        attended = attended
         return attended[..., 0] + attended[..., 1].transpose(-2, -3)
 
-    def _get_gated(self, edge_repr: torch.Tensor, mask: torch.Tensor, fwd_cfg):
-        gated = torch.empty(
+    def _get_gated(self, edge_repr: tinygrad.Tensor, mask: tinygrad.Tensor, fwd_cfg):
+        gated = tinygrad.Tensor.empty(
             *edge_repr.shape[:2],
             self.n_axis,
             self.d_edge,
@@ -647,28 +689,29 @@ class GeometricAttention(OFModule):
                 edge_repr, subbatch_size=fwd_cfg.subbatch_size
         ):
             act_row = self._get_act_row(edge_row, mask[s_row:e_row])
-            act_g = torch.sigmoid(
-                torch.einsum(
-                    '...dr,drc->...rc',
+            act_g = (
+                tinygrad.Tensor.einsum(
+                    'abdr,drc->abrc',
                     edge_row,
                     self.act_w[..., -self.d_edge:]
-                ) + self.act_b[..., -self.d_edge:]
-            )
+                ) + self.act_b[..., -self.d_edge:]).sigmoid()
+            
             for s_col, e_col, edge_col, in _get_sharded_stacked(
                     edge_repr, subbatch_size=fwd_cfg.subbatch_size
             ):
                 act_col = self._get_act_col(edge_col, mask[s_col:e_col])
-                ab = torch.einsum('...ikrd,...jkrd->...ijrd', act_row, act_col)
-                ab = utils.normalize(ab.contiguous())
-                gated[s_row:e_row, s_col:e_col] = torch.einsum(
-                    '...rd,rdc->...rc', ab, self.out_proj_w
+                ab = tinygrad.Tensor.einsum('ikrd,jkrd->ijrd', act_row, act_col)
+                ab = utils.normalize(to_torch(ab.contiguous()))
+                ab = to_tinygrad(ab)
+                gated[s_row:e_row, s_col:e_col] = tinygrad.Tensor.einsum(
+                    'abrd,rdc->abrc', ab, self.out_proj_w
                 )
-                gated[s_row:e_row, s_col:e_col].add_(self.out_proj_b)
+                gated[s_row:e_row, s_col:e_col].add(self.out_proj_b)
                 gated[s_row:e_row, s_col:e_col] *= act_g[:, s_col:e_col]
 
         return gated.sum(-2)
 
-    def _get_sliced_weight(self, weight: torch.Tensor, shift=0):
+    def _get_sliced_weight(self, weight: tinygrad.Tensor, shift=0) -> tinygrad.Tensor:
         w = weight[..., :-self.d_edge].unflatten(-1, sizes=(4, -1))
         w = w[..., shift::2, :]
         w = w.flatten(start_dim=-2)
@@ -676,34 +719,36 @@ class GeometricAttention(OFModule):
 
     def _get_act_row(
             self,
-            edge_row: torch.Tensor,
-            mask: torch.Tensor
-    ) -> torch.Tensor:
+            edge_row: tinygrad.Tensor,
+            mask: tinygrad.Tensor
+    ) -> tinygrad.Tensor:
         w = self._get_sliced_weight(self.act_w)
         b = self._get_sliced_weight(self.act_b)
-        act = torch.einsum('...dr,drc->...rc', edge_row, w) + b
-        act = self.glu(act) * mask[..., None, None, None]
+        act = tinygrad.Tensor.einsum('abdr,drc->abrc', edge_row, w) + b
+        act = tg_glu(act) * mask[..., None, None, None]
         return act
 
     def _get_act_col(
             self,
-            edge_row: torch.Tensor,
-            mask: torch.Tensor
-    ) -> torch.Tensor:
+            edge_row: tinygrad.Tensor,
+            mask: tinygrad.Tensor
+    ) -> tinygrad.Tensor:
         w = self._get_sliced_weight(self.act_w, shift=1)
         b = self._get_sliced_weight(self.act_b, shift=1)
-        act = torch.einsum('...dr,drc->...rc', edge_row, w) + b
-        act = self.glu(act) * mask[..., None, None, None]
+        act = tinygrad.Tensor.einsum('abdr,drc->abrc', edge_row, w) + b
+        act = tg_glu(act) * mask[..., None, None, None]
         return act
 
     def forward(
             self, edge_repr: torch.Tensor, mask: torch.Tensor, fwd_cfg
     ) -> torch.Tensor:
         edge_repr = utils.normalize(edge_repr)
+        edge_repr = to_tinygrad(edge_repr)
+        mask = to_tinygrad(mask)
         out = self._get_attended(edge_repr, mask, fwd_cfg)
         out += self._get_gated(edge_repr, mask, fwd_cfg)
 
-        return out
+        return to_torch(out)
 
 
 # =============================================================================

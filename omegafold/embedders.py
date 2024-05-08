@@ -23,11 +23,14 @@
 import argparse
 import typing
 
+import tinygrad.tensor
 import torch
 from torch import nn
 
 from omegafold import modules, utils
 from omegafold.utils import residue_constants as rc
+from omegafold.utils.conversion import Module, dt2tg, dv2tg, to_torch, to_tinygrad
+import tinygrad
 
 
 # =============================================================================
@@ -37,11 +40,11 @@ from omegafold.utils import residue_constants as rc
 # Functions
 # =============================================================================
 def _get_pos(
-        shape: torch.Size,
-        device: torch.device,
-        dtype: torch.dtype,
+        shape,
+        device,
+        dtype,
         seq_dim: typing.Tuple[int, ...]
-) -> torch.Tensor:
+) -> tinygrad.Tensor:
     """Get the position of the tokens given
 
     Args:
@@ -58,18 +61,18 @@ def _get_pos(
     total_len = 1
     for i in spatial_shape:
         total_len *= i
-    position = torch.arange(total_len, dtype=dtype, device=device)
+    position = tinygrad.Tensor.arange(total_len, dtype=dtype, device=device)
     position = position.reshape(*spatial_shape)
 
     return position
 
 
 def _apply_embed(
-        inputs: torch.Tensor,
-        sin: torch.Tensor,
-        cos: torch.Tensor,
+        inputs: tinygrad.Tensor,
+        sin: tinygrad.Tensor,
+        cos: tinygrad.Tensor,
         seq_dim: typing.Tuple[int, ...]
-) -> torch.Tensor:
+) -> tinygrad.Tensor:
     """Applies RoPE to ~inputs
 
     Args:
@@ -106,8 +109,8 @@ def _apply_embed(
         cos = cos.unsqueeze(_)
 
     # Apply RoPE
-    x1, x2 = torch.split(inputs, inputs.shape[-1] // 2, dim=-1)
-    return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)
+    x1, x2 = tinygrad.Tensor.split(inputs, inputs.shape[-1] // 2, dim=-1)
+    return tinygrad.Tensor.cat(x1 * cos - x2 * sin, x2 * cos + x1 * sin, dim=-1)
 
 
 # =============================================================================
@@ -138,7 +141,7 @@ class EdgeEmbedder(modules.OFModule):
         return out
 
 
-class RoPE(nn.Module):
+class RoPE(Module):
     """The RoPE module
 
     Attributes:
@@ -155,16 +158,16 @@ class RoPE(nn.Module):
             )
         self.input_dim = input_dim
         self.half_size = input_dim // 2
-        freq_seq = torch.arange(self.half_size, dtype=torch.float32)
+        freq_seq = tinygrad.Tensor.arange(self.half_size, dtype=tinygrad.dtypes.float32)
         freq_seq = -freq_seq.div(float(self.half_size))
 
-        self.register_buffer(
-            "inv_freq", torch.pow(10000., freq_seq), persistent=False
-        )
+        base = tinygrad.Tensor.full_like(freq_seq, 10000.)
+        self.inv_freq = base.pow(freq_seq)
+        self.no_load("inv_freq")
 
     def forward(
-            self, tensor: torch.Tensor, seq_dim: typing.Union[int, tuple]
-    ) -> torch.Tensor:
+            self, tensor: tinygrad.Tensor, seq_dim: typing.Union[int, tuple]
+    ) -> tinygrad.Tensor:
         """
 
         Args:
@@ -181,8 +184,8 @@ class RoPE(nn.Module):
         return _apply_embed(tensor, sin, cos, seq_dim)
 
     def _compute_sin_cos(
-            self, tensor: torch.Tensor, seq_dim: typing.Tuple[int]
-    ) -> typing.Tuple[torch.Tensor, torch.Tensor]:
+            self, tensor: tinygrad.Tensor, seq_dim: typing.Tuple[int]
+    ) -> typing.Tuple[tinygrad.Tensor, tinygrad.Tensor]:
         """Compute sine and cosine tensors
 
         Args:
@@ -195,8 +198,8 @@ class RoPE(nn.Module):
 
         """
         position = _get_pos(tensor.shape, tensor.device, tensor.dtype, seq_dim)
-        sinusoid = torch.einsum("..., d->...d", position, self.inv_freq)
-        sin, cos = torch.sin(sinusoid), torch.cos(sinusoid)
+        sinusoid = tinygrad.Tensor.einsum("b, d->bd", position, self.inv_freq)     # Will cause errors
+        sin, cos = sinusoid.sin(), sinusoid.cos()
         return sin, cos
 
 
