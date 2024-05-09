@@ -239,9 +239,7 @@ class Transition(OFModule):
         out = tinygrad.Tensor.empty(x.shape, device=x.device, dtype=x.dtype)
         for i, x_i in enumerate(x.split(subbatch_size, dim=0)):
             start, end = i * subbatch_size, (i + 1) * subbatch_size
-            x_i = to_torch(x_i)
-            x_i = utils.normalize(x_i)
-            x_i = to_tinygrad(x_i)
+            x_i = utils.tnormalize(x_i)
             out[start:end] = self.network(x_i)
         return to_torch(out)
 
@@ -386,9 +384,9 @@ class Node2Edge(OFModule):
             self, node_repr: torch.Tensor, mask: torch.Tensor
     ) -> torch.Tensor:
         mask = to_tinygrad(mask)
-        
-        node_repr = utils.normalize(node_repr) # TODO: Convert normalize to tinygrad
         node_repr = to_tinygrad(node_repr)
+        
+        node_repr = utils.tnormalize(node_repr)
 
         act = self.input_proj(node_repr)
         mask = mask[..., None]
@@ -574,14 +572,15 @@ class AttentionWEdgeBias(OFModule):
         Returns:
 
         """
-        node_repr = utils.normalize(node_repr)
-        edge_repr = utils.normalize(edge_repr)
         node_repr = to_tinygrad(node_repr)
         edge_repr = to_tinygrad(edge_repr)
+        mask = to_tinygrad(mask)
+        node_repr = utils.tnormalize(node_repr)
+        edge_repr = utils.tnormalize(edge_repr)
         # check dim
         edge_bias = self.proj_edge_bias(edge_repr).permute(2, 0, 1)
 
-        edge_bias = edge_bias + to_tinygrad(utils.mask2bias(mask[..., None, None, :]))
+        edge_bias = edge_bias + utils.tmask2bias(mask[..., None, None, :])
         attn_out = self.attention(
             node_repr, node_repr, bias=edge_bias, fwd_cfg=fwd_cfg
         )
@@ -655,13 +654,20 @@ class GeometricAttention(OFModule):
             dtype=edge_repr.dtype,
             device=edge_repr.device
         )
-        b = torch.zeros(
+
+        b = tinygrad.Tensor.ones(
             self.n_axis, self.n_head, *edge_repr.shape[:2],
-            dtype=dt2trch[edge_repr.dtype],
-            device=dv2trch[edge_repr.device]
+            dtype=edge_repr.dtype,
+            device=edge_repr.device
         )
-        b += utils.mask2bias(to_torch(mask))
-        b = to_tinygrad(b)
+        '''
+        This is objectively very stupid. For some reason, b += mask2bias is not working. I replaced it with a multiplication followed by subtraction, because with
+        mask values near infinity, 0 + mask ~= mask - 1 and 0 + 0 = 1 - 1
+
+        This is dumb, but it works and I'm tired of debugging this
+        '''
+        b = (b * utils.tmask2bias(mask)) - 1    # HACK: see above
+
         for s, e, edge_r in _get_sharded_stacked(
                 edge_repr, subbatch_size=fwd_cfg.subbatch_size
         ):
@@ -701,7 +707,7 @@ class GeometricAttention(OFModule):
             ):
                 act_col = self._get_act_col(edge_col, mask[s_col:e_col])
                 ab = tinygrad.Tensor.einsum('ikrd,jkrd->ijrd', act_row, act_col)
-                ab = utils.normalize(to_torch(ab.contiguous()))
+                ab = utils.tnormalize(ab.contiguous())
                 ab = to_tinygrad(ab)
                 gated[s_row:e_row, s_col:e_col] = tinygrad.Tensor.einsum(
                     'abrd,rdc->abrc', ab, self.out_proj_w
@@ -742,7 +748,7 @@ class GeometricAttention(OFModule):
     def forward(
             self, edge_repr: torch.Tensor, mask: torch.Tensor, fwd_cfg
     ) -> torch.Tensor:
-        edge_repr = utils.normalize(edge_repr)
+        edge_repr = utils.tnormalize(edge_repr)
         edge_repr = to_tinygrad(edge_repr)
         mask = to_tinygrad(mask)
         out = self._get_attended(edge_repr, mask, fwd_cfg)
